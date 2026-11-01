@@ -34,6 +34,7 @@ import (
 	"github.com/AlexxIT/go2rtc/internal/onvif"
 	"github.com/AlexxIT/go2rtc/internal/pinggy"
 	"github.com/AlexxIT/go2rtc/internal/ring"
+	"github.com/AlexxIT/go2rtc/internal/recording"
 	"github.com/AlexxIT/go2rtc/internal/roborock"
 	"github.com/AlexxIT/go2rtc/internal/rtmp"
 	"github.com/AlexxIT/go2rtc/internal/rtsp"
@@ -71,6 +72,7 @@ func main() {
 		{"webrtc", webrtc.Init}, // webrtc source, WebRTC server
 		// Main API
 		{"mp4", mp4.Init},     // MP4 API
+		{"", recording.Init}, // Luxe recording session API
 		{"hls", hls.Init},     // HLS API
 		{"mjpeg", mjpeg.Init}, // MJPEG API
 		// Other sources and servers
