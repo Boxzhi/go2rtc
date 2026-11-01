@@ -81,8 +81,11 @@ func (c *Keyframe) AddTrack(media *core.Media, _ *core.Codec, track *core.Receiv
 			}
 
 			// important to use Mutex because right fragment order
-			b := c.muxer.GetPayload(0, packet)
-			b = append(init, b...)
+			fragment := c.muxer.GetPayload(0, packet)
+			if len(fragment) == 0 {
+				return
+			}
+			b := append(init, fragment...)
 			if n, err := c.wr.Write(b); err == nil {
 				c.Send += n
 			}

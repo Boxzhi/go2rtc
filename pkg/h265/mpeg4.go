@@ -37,38 +37,43 @@ func DecodeConfig(conf []byte) (profile, vps, sps, pps []byte) {
 }
 
 func EncodeConfig(vps, sps, pps []byte) []byte {
-	vpsSize := uint16(len(vps))
-	spsSize := uint16(len(sps))
-	ppsSize := uint16(len(pps))
+	return encodeConfig(vps, sps, pps, false)
+}
 
+// EncodeConfigHVC1 marks the VPS/SPS/PPS arrays complete. hvc1 samples carry
+// parameter sets in hvcC rather than repeating them in media samples.
+func EncodeConfigHVC1(vps, sps, pps []byte) []byte {
+	return encodeConfig(vps, sps, pps, true)
+}
+
+func encodeConfig(vps, sps, pps []byte, arrayComplete bool) []byte {
+	vpsSize, spsSize, ppsSize := uint16(len(vps)), uint16(len(sps)), uint16(len(pps))
 	buf := make([]byte, 23+5+vpsSize+5+spsSize+5+ppsSize)
-
 	buf[0] = 1
-	copy(buf[1:], sps[3:6]) // profile
-	buf[21] = 3             // ?
-	buf[22] = 3             // ?
+	copy(buf[1:], sps[3:6])
+	buf[21] = 3
+	buf[22] = 3
+
+	var completeness byte
+	if arrayComplete { completeness = 0x80 }
 
 	b := buf[23:]
-	_ = b[5]
-	b[0] = (vps[0] >> 1) & 0x3F
-	binary.BigEndian.PutUint16(b[1:], 1) // VPS count
+	b[0] = completeness | ((vps[0] >> 1) & 0x3F)
+	binary.BigEndian.PutUint16(b[1:], 1)
 	binary.BigEndian.PutUint16(b[3:], vpsSize)
 	copy(b[5:], vps)
 
 	b = buf[23+5+vpsSize:]
-	_ = b[5]
-	b[0] = (sps[0] >> 1) & 0x3F
-	binary.BigEndian.PutUint16(b[1:], 1) // SPS count
+	b[0] = completeness | ((sps[0] >> 1) & 0x3F)
+	binary.BigEndian.PutUint16(b[1:], 1)
 	binary.BigEndian.PutUint16(b[3:], spsSize)
 	copy(b[5:], sps)
 
 	b = buf[23+5+vpsSize+5+spsSize:]
-	_ = b[5]
-	b[0] = (pps[0] >> 1) & 0x3F
-	binary.BigEndian.PutUint16(b[1:], 1) // PPS count
+	b[0] = completeness | ((pps[0] >> 1) & 0x3F)
+	binary.BigEndian.PutUint16(b[1:], 1)
 	binary.BigEndian.PutUint16(b[3:], ppsSize)
 	copy(b[5:], pps)
-
 	return buf
 }
 

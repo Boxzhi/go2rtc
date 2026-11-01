@@ -221,23 +221,24 @@ func (m *Movie) WriteTrackExtend(id uint32) {
 }
 
 func (m *Movie) WriteVideoTrack(id uint32, codec string, timescale uint32, width, height uint16, conf []byte) {
+	m.WriteVideoTrackWithEntry(id, codec, timescale, width, height, conf, "")
+}
+
+func (m *Movie) WriteVideoTrackWithEntry(id uint32, codec string, timescale uint32, width, height uint16, conf []byte, sampleEntry string) {
 	m.StartAtom(MoovTrak)
 	m.WriteTrackHeader(id, width, height)
-
 	m.StartAtom(MoovTrakMdia)
 	m.WriteMediaHeader(timescale)
 	m.WriteMediaHandler("vide", "VideoHandler")
-
 	m.StartAtom(MoovTrakMdiaMinf)
 	m.WriteVideoMediaInfo()
 	m.WriteDataInfo()
 	m.WriteSampleTable(func() {
-		m.WriteVideo(codec, width, height, conf)
+		m.WriteVideoWithSampleEntry(codec, sampleEntry, width, height, conf)
 	})
-	m.EndAtom() // MINF
-
-	m.EndAtom() // MDIA
-	m.EndAtom() // TRAK
+	m.EndAtom()
+	m.EndAtom()
+	m.EndAtom()
 }
 
 func (m *Movie) WriteAudioTrack(id uint32, codec string, timescale uint32, channels uint16, conf []byte) {

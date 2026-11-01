@@ -6,47 +6,54 @@ import (
 )
 
 func (m *Movie) WriteVideo(codec string, width, height uint16, conf []byte) {
-	// https://developer.apple.com/library/archive/documentation/QuickTime/QTFF/QTFFChap3/qtff3.html
+	sampleEntry := "avc1"
+	if codec == core.CodecH265 {
+		// Keep the legacy HEVC entry by default. hvc1 is selected explicitly
+		// only when the muxer has a complete, stable parameter-set configuration.
+		sampleEntry = "hev1"
+	}
+	m.WriteVideoWithSampleEntry(codec, sampleEntry, width, height, conf)
+}
+
+func (m *Movie) WriteVideoWithSampleEntry(codec, sampleEntry string, width, height uint16, conf []byte) {
 	switch codec {
 	case core.CodecH264:
-		m.StartAtom("avc1")
+		if sampleEntry == "" { sampleEntry = "avc1" }
+		if sampleEntry != "avc1" { panic("unsupported H264 sample entry: " + sampleEntry) }
 	case core.CodecH265:
-		m.StartAtom("hev1")
+		if sampleEntry == "" { sampleEntry = "hev1" }
+		if sampleEntry != "hev1" && sampleEntry != "hvc1" { panic("unsupported H265 sample entry: " + sampleEntry) }
 	default:
 		panic("unsupported iso video: " + codec)
 	}
+
+	m.StartAtom(sampleEntry)
 	m.Skip(6)
-	m.WriteUint16(1)      // data_reference_index
-	m.Skip(2)             // version
-	m.Skip(2)             // revision
-	m.Skip(4)             // vendor
-	m.Skip(4)             // temporal quality
-	m.Skip(4)             // spatial quality
-	m.WriteUint16(width)  // width
-	m.WriteUint16(height) // height
-	m.WriteFloat32(72)    // horizontal resolution
-	m.WriteFloat32(72)    // vertical resolution
-	m.Skip(4)             // reserved
-	m.WriteUint16(1)      // frame count
-	m.Skip(32)            // compressor name
-	m.WriteUint16(24)     // depth
-	m.WriteUint16(0xFFFF) // color table id (-1)
+	m.WriteUint16(1)
+	m.Skip(2)
+	m.Skip(2)
+	m.Skip(4)
+	m.Skip(4)
+	m.Skip(4)
+	m.WriteUint16(width)
+	m.WriteUint16(height)
+	m.WriteFloat32(72)
+	m.WriteFloat32(72)
+	m.Skip(4)
+	m.WriteUint16(1)
+	m.Skip(32)
+	m.WriteUint16(24)
+	m.WriteUint16(0xFFFF)
 
-	switch codec {
-	case core.CodecH264:
-		m.StartAtom("avcC")
-	case core.CodecH265:
-		m.StartAtom("hvcC")
-	}
+	if codec == core.CodecH264 { m.StartAtom("avcC") } else { m.StartAtom("hvcC") }
 	m.Write(conf)
-	m.EndAtom() // AVCC
-
-	m.StartAtom("pasp") // Pixel Aspect Ratio
-	m.WriteUint32(1)    // hSpacing
-	m.WriteUint32(1)    // vSpacing
 	m.EndAtom()
 
-	m.EndAtom() // AVC1
+	m.StartAtom("pasp")
+	m.WriteUint32(1)
+	m.WriteUint32(1)
+	m.EndAtom()
+	m.EndAtom()
 }
 
 func (m *Movie) WriteAudio(codec string, channels uint16, sampleRate uint32, conf []byte) {
