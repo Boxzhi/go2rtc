@@ -20,6 +20,7 @@ import (
 	"github.com/AlexxIT/go2rtc/internal/streams"
 	"github.com/AlexxIT/go2rtc/pkg/mp4"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 const (
@@ -87,12 +88,14 @@ type manager struct {
 	now      func() time.Time
 }
 
-var log = app.GetLogger("recording")
+var log zerolog.Logger
 
 // Init registers the Luxe recording-session API. Recording data is streamed
 // directly to the authenticated browser; this package never writes video files
 // to the add-on filesystem or Home Assistant /media.
 func Init() {
+	log = app.GetLogger("recording")
+
 	var cfg struct {
 		Mod struct {
 			Enabled bool   `yaml:"enabled"`
