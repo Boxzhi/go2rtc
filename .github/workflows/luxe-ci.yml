@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - luxe/hlc7
+      - luxe/recording-manager-dev
   pull_request:
     branches:
       - luxe/hlc7
+      - luxe/recording-manager-dev
   workflow_dispatch:
 
 permissions:
@@ -24,7 +26,7 @@ jobs:
           go-version: '1.27'
           cache: true
       - name: Test affected packages
-        run: go test -count=1 ./pkg/h265 ./pkg/iso ./pkg/mp4 ./pkg/xiaomi/miss/...
+        run: go test -count=1 ./internal/recording ./pkg/h265 ./pkg/iso ./pkg/mp4 ./pkg/xiaomi/miss/...
       - name: Build all packages
         run: go build ./...
       - name: Build Linux AMD64 binary
