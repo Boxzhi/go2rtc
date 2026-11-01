@@ -1,6 +1,8 @@
 package miss
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"net/url"
 	"time"
@@ -32,7 +34,11 @@ func Dial(rawURL string) (core.Producer, error) {
 		return nil, err
 	}
 
-	medias, err := probe(client, query.Get("audio") != "0")
+	quality := query.Get("subtype")
+	// The HLC7 HD stream may send VPS/SPS/PPS across separate packets.
+	// Keep the original probe for SD and other Xiaomi camera models.
+	preferHD := query.Get("model") == "isa.camera.hlc7" && quality != "1" && quality != "sd"
+	medias, err := probe(client, query.Get("audio") != "0", preferHD)
 	if err != nil {
 		_ = client.Close()
 		return nil, err
@@ -52,14 +58,23 @@ func Dial(rawURL string) (core.Producer, error) {
 	}, nil
 }
 
-func probe(client *Client, audio bool) ([]*core.Media, error) {
+func probe(client *Client, audio bool, preferHD bool) ([]*core.Media, error) {
 	_ = client.SetDeadline(time.Now().Add(15 * time.Second))
 
 	var vcodec, acodec *core.Codec
+	var sdFallback *core.Codec
+	var sdSince time.Time
+	var lastWidth, lastHeight uint16
+	var vps, sps, pps []byte
 
 	for {
 		pkt, err := client.ReadPacket()
 		if err != nil {
+			if preferHD && vcodec == nil && sdFallback != nil && (acodec != nil || !audio) {
+				vcodec = sdFallback
+				fmt.Println("[hlc7-probe] input ended; using original SD parameter sets")
+				break
+			}
 			if vcodec != nil {
 				err = fmt.Errorf("no audio")
 			} else if acodec != nil {
@@ -79,7 +94,27 @@ func probe(client *Client, audio bool) ([]*core.Media, error) {
 		case codecH265:
 			if vcodec == nil {
 				buf := annexb.EncodeToAVCC(pkt.Payload)
-				if h265.NALUType(buf) == h265.NALUTypeVPS {
+				if preferHD {
+					vps, sps, pps = hlc7ReadAVCCParams(buf, vps, sps, pps)
+					if len(vps) > 0 && len(sps) > 0 && len(pps) > 0 {
+						parsed := h265.DecodeSPS(sps)
+						if parsed != nil && parsed.Width() > 0 && parsed.Height() > 0 {
+							w, h := parsed.Width(), parsed.Height()
+							candidate := h265.AVCCToCodec(hlc7JoinAVCC(vps, sps, pps))
+							if w != lastWidth || h != lastHeight {
+								fmt.Printf("[hlc7-probe] received HEVC SPS coded size %dx%d\\n", w, h)
+								lastWidth, lastHeight = w, h
+							}
+							if w >= 1280 && h >= 720 {
+								vcodec = candidate
+								fmt.Printf("[hlc7-probe] selected HD parameter sets %dx%d\\n", w, h)
+							} else if sdFallback == nil {
+								sdFallback = candidate
+								sdSince = time.Now()
+							}
+						}
+					}
+				} else if h265.NALUType(buf) == h265.NALUTypeVPS {
 					vcodec = h265.AVCCToCodec(buf)
 				}
 			}
@@ -94,6 +129,11 @@ func probe(client *Client, audio bool) ([]*core.Media, error) {
 		}
 
 		if vcodec != nil && (acodec != nil || !audio) {
+			break
+		}
+		if preferHD && vcodec == nil && sdFallback != nil && time.Since(sdSince) >= 4*time.Second && (acodec != nil || !audio) {
+			vcodec = sdFallback
+			fmt.Println("[hlc7-probe] HD parameter sets not found within 4 seconds; using original SD parameter sets")
 			break
 		}
 	}
@@ -123,6 +163,48 @@ func probe(client *Client, audio bool) ([]*core.Media, error) {
 	}
 
 	return medias, nil
+}
+
+// hlc7ReadAVCCParams extracts VPS/SPS/PPS from length-prefixed HEVC access
+// units. A changed VPS invalidates the collected SPS/PPS; a changed SPS
+// invalidates the PPS so a new generation is not assembled from stale data.
+func hlc7ReadAVCCParams(buf, vps, sps, pps []byte) ([]byte, []byte, []byte) {
+	for len(buf) >= 6 {
+		size := int(binary.BigEndian.Uint32(buf[:4]))
+		if size < 2 || size > len(buf)-4 {
+			break
+		}
+		nalu := buf[4 : 4+size]
+		switch (nalu[0] >> 1) & 0x3f {
+		case 32: // VPS
+			if !bytes.Equal(vps, nalu) {
+				vps = append([]byte(nil), nalu...)
+				sps, pps = nil, nil
+			}
+		case 33: // SPS
+			if !bytes.Equal(sps, nalu) {
+				sps = append([]byte(nil), nalu...)
+				pps = nil
+			}
+		case 34: // PPS
+			if !bytes.Equal(pps, nalu) {
+				pps = append([]byte(nil), nalu...)
+			}
+		}
+		buf = buf[4+size:]
+	}
+	return vps, sps, pps
+}
+
+func hlc7JoinAVCC(params ...[]byte) []byte {
+	var out []byte
+	for _, p := range params {
+		var header [4]byte
+		binary.BigEndian.PutUint32(header[:], uint32(len(p)))
+		out = append(out, header[:]...)
+		out = append(out, p...)
+	}
+	return out
 }
 
 const timestamp40ms = 48000 * 0.040
