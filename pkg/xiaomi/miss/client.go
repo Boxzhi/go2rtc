@@ -84,7 +84,8 @@ func (c *Client) startCommandLoop() {
 			if _, _, err := c.Conn.ReadCommand(); err != nil {
 				return
 			}
-		}()
+		}
+	}()
 }
 
 type Client struct {

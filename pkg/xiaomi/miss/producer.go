@@ -102,12 +102,12 @@ func probe(client *Client, audio bool, preferHD bool) ([]*core.Media, error) {
 							w, h := parsed.Width(), parsed.Height()
 							candidate := h265.AVCCToCodec(hlc7JoinAVCC(vps, sps, pps))
 							if w != lastWidth || h != lastHeight {
-								fmt.Printf("[hlc7-probe] received HEVC SPS coded size %dx%d\\n", w, h)
+								fmt.Printf("[hlc7-probe] received HEVC SPS coded size %dx%d\n", w, h)
 								lastWidth, lastHeight = w, h
 							}
 							if w >= 1280 && h >= 720 {
 								vcodec = candidate
-								fmt.Printf("[hlc7-probe] selected HD parameter sets %dx%d\\n", w, h)
+								fmt.Printf("[hlc7-probe] selected HD parameter sets %dx%d\n", w, h)
 							} else if sdFallback == nil {
 								sdFallback = candidate
 								sdSince = time.Now()

@@ -13,10 +13,14 @@ import (
 	"github.com/AlexxIT/go2rtc/pkg/xiaomi/crypto"
 )
 
-func hlc7TestAVCC(nalu []byte) []byte {
-	packet := make([]byte, 4+len(nalu))
-	binary.BigEndian.PutUint32(packet, uint32(len(nalu)))
-	copy(packet[4:], nalu)
+func hlc7TestAVCC(nalus ...[]byte) []byte {
+	var packet []byte
+	for _, nalu := range nalus {
+		var header [4]byte
+		binary.BigEndian.PutUint32(header[:], uint32(len(nalu)))
+		packet = append(packet, header[:]...)
+		packet = append(packet, nalu...)
+	}
 	return packet
 }
 
