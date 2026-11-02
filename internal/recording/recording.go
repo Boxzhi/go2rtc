@@ -337,15 +337,27 @@ func (m *manager) stream(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	m.mu.Lock()
-	if s.State == stateStarting {
-		s.State = stateRecording
-	}
-	m.mu.Unlock()
-
+	// Keep the session in 'starting' until the first actual media fragment
+	// has been written. Successfully attaching a Consumer alone does not
+	// prove the camera has delivered a keyframe.
 	cleanupDone := make(chan struct{})
 	go func() {
 		<-ctx.Done()
+		// Gracefully stop only when the user pressed Stop or the 30-minute
+		// server limit fired. On a browser disconnect, do not wait for a
+		// dead peer: release the Consumer immediately.
+		if r.Context().Err() == nil {
+			m.mu.Lock()
+			reason := s.StopReason
+			m.mu.Unlock()
+			if reason == "user" || reason == "time_limit" {
+				drainCtx, cancelDrain := context.WithTimeout(context.Background(), 5*time.Second)
+				if err := consumer.Drain(drainCtx); err != nil {
+					m.noteStreamFailure(s, "drain_timeout", "could not flush pending MP4 fragments: "+err.Error())
+				}
+				cancelDrain()
+			}
+		}
 		stream.RemoveConsumer(consumer)
 		close(cleanupDone)
 	}()
@@ -378,12 +390,18 @@ func (m *manager) stream(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	w.WriteHeader(http.StatusOK)
 
-	_, writeErr := consumer.WriteTo(flushWriter{ResponseWriter: w})
+	writer := &flushWriter{ResponseWriter: w, onFirstMedia: func() { m.markMediaStarted(s) }}
+	_, writeErr := consumer.WriteTo(writer)
 	ctxErr := ctx.Err()
 	cancel()
 	<-cleanupDone
 	<-dropMonitorDone
 
+	// MP4 initialization alone is not a playable camera recording. Report
+	// a failed session if normal stop/timeout occurred before any media.
+	if !writer.mediaWritten && r.Context().Err() == nil {
+		m.noteStreamFailure(s, "no_media", "camera did not deliver a media frame")
+	}
 	m.finish(s, writeErr, ctxErr)
 	if writeErr != nil && ctxErr == nil {
 		log.Warn().Err(writeErr).Str("session", s.ID).Msg("recording stream ended with an error")
@@ -503,12 +521,33 @@ func (m *manager) getOwned(id, userID string) (*session, error) {
 	return s, nil
 }
 
+func (m *manager) markMediaStarted(s *session) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s.StartedAt.IsZero() {
+		s.StartedAt = m.now()
+	}
+	if s.State == stateStarting {
+		s.State = stateRecording
+	}
+}
+
+func (m *manager) noteStreamFailure(s *session, reason, message string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// A detected transport drop takes precedence over subsequent cleanup.
+	if s.StopReason != "transport_drops" {
+		s.StopReason = reason
+		s.Error = message
+	}
+}
+
 func (m *manager) finish(s *session, writeErr, ctxErr error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	switch {
-	case s.StopReason == "transport_drops":
+	case s.StopReason == "transport_drops" || s.StopReason == "no_media" || s.StopReason == "drain_timeout":
 		s.State = stateFailed
 		if s.Error == "" {
 			s.Error = "recording stopped after transport packet loss"
@@ -625,15 +664,29 @@ func writeError(w http.ResponseWriter, status int, message string) {
 
 type flushWriter struct {
 	http.ResponseWriter
+	onFirstMedia func()
+	writes int
+	mediaWritten bool
 }
 
-func (w flushWriter) Write(p []byte) (int, error) {
+func (w *flushWriter) Write(p []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(p)
+	if n > 0 {
+		w.writes++
+		// The first mp4.Consumer.WriteTo call writes the fMP4 init segment;
+		// its subsequent writes carry actual media fragments.
+		if w.writes > 1 && !w.mediaWritten {
+			w.mediaWritten = true
+			if w.onFirstMedia != nil {
+				w.onFirstMedia()
+			}
+		}
+	}
 	w.Flush()
 	return n, err
 }
 
-func (w flushWriter) Flush() {
+func (w *flushWriter) Flush() {
 	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
