@@ -81,6 +81,7 @@ async function serveOPFSFile(event, fileName, finishLifetime) {
     start(controller) {
       handshakeTimer = setTimeout(() => {
         if (finished) return;
+        try { channel.port1.postMessage({ type: "cancel" }); } catch (_) {}
         controller.error(new Error("OPFS 读取 Worker 启动超时"));
         notify(client, "download-stream-error", fileName, { message: "OPFS 读取 Worker 启动超时" });
         finish();
@@ -106,6 +107,7 @@ async function serveOPFSFile(event, fileName, finishLifetime) {
           const bytes = new Uint8Array(data.buffer);
           const count = Number(data.bytes) || bytes.byteLength;
           if (count !== bytes.byteLength) {
+            try { channel.port1.postMessage({ type: "cancel" }); } catch (_) {}
             controller.error(new Error("OPFS 分块长度不一致"));
             notify(client, "download-stream-error", fileName, { message: "OPFS 分块长度不一致" });
             finish();
