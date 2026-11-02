@@ -172,10 +172,10 @@ func (m *manager) createOPFSRelay(w http.ResponseWriter, r *http.Request, user *
 		"crc32": fmt.Sprintf("%08x", s.expectedCRC),
 		"chunk_size": opfsRelayChunkSize,
 		"upload_url": apiURL,
-		"complete_url": m.opfsRelayURL(r, s.ID, "complete"),
-		"abort_url": m.opfsRelayURL(r, s.ID, "abort"),
-		"status_url": m.opfsRelayURL(r, s.ID, "status"),
-		"download_url": m.opfsRelayURL(r, s.ID, "download"),
+		"complete_url": m.opfsRelayURL(r, s.id, "complete"),
+		"abort_url": m.opfsRelayURL(r, s.id, "abort"),
+		"status_url": m.opfsRelayURL(r, s.id, "status"),
+		"download_url": m.opfsRelayURL(r, s.id, "download"),
 	})
 }
 
