@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestConsumerDropCountOnlyCountsActiveSenderDrops(t *testing.T) {
+func TestConsumerDropCountPersistsAfterSenderDrain(t *testing.T) {
 	sender := core.NewSender(nil, &core.Codec{Name: core.CodecH264})
 	for i := 0; i < 4097; i++ {
 		sender.Input(&core.Packet{})
@@ -21,5 +21,6 @@ func TestConsumerDropCountOnlyCountsActiveSenderDrops(t *testing.T) {
 	require.Equal(t, 1, consumer.DropCount())
 
 	sender.Close()
-	require.Zero(t, consumer.DropCount())
+	// A queued packet drop remains a recording-integrity failure after Stop.
+	require.Equal(t, 1, consumer.DropCount())
 }
