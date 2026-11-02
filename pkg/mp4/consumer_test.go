@@ -7,14 +7,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestConsumerDropCount(t *testing.T) {
-	first := &core.Sender{Drops: 2}
-	second := &core.Sender{Drops: 3}
-	consumer := &Consumer{
-		Connection: core.Connection{
-			Senders: []*core.Sender{first, second},
-		},
+func TestConsumerDropCountOnlyCountsActiveSenderDrops(t *testing.T) {
+	sender := core.NewSender(nil, &core.Codec{Name: core.CodecH264})
+	for i := 0; i < 4097; i++ {
+		sender.Input(&core.Packet{})
 	}
 
-	require.Equal(t, 5, consumer.DropCount())
+	consumer := &Consumer{
+		Connection: core.Connection{
+			Senders: []*core.Sender{sender},
+		},
+	}
+	require.Equal(t, 1, consumer.DropCount())
+
+	sender.Close()
+	require.Zero(t, consumer.DropCount())
 }
