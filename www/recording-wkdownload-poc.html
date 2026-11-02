@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <title>Luxe WKDownload 原生附件下载 POC</title>
+  <style>
+    :root { color-scheme:dark; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#111827; color:#e5e7eb; }
+    body { margin:0; padding:22px; max-width:760px; margin-inline:auto; }
+    h1 { margin:0 0 10px; font-size:23px; }
+    p { color:#9ca3af; line-height:1.65; }
+    .panel { border:1px solid #374151; border-radius:14px; background:#1f2937; padding:18px; margin:16px 0; }
+    .status { color:#93c5fd; overflow-wrap:anywhere; }
+    .grid { display:grid; grid-template-columns:150px 1fr; gap:10px 14px; margin:16px 0; }
+    .key { color:#9ca3af; }
+    .value { color:#e5e7eb; overflow-wrap:anywhere; }
+    .button { display:inline-block; border-radius:9px; padding:13px 18px; background:#2563eb; color:#fff; text-decoration:none; font-weight:700; }
+    .secondary { color:#93c5fd; }
+    code { color:#bfdbfe; overflow-wrap:anywhere; }
+    @media(max-width:520px) { body { padding:15px; } .grid { grid-template-columns:1fr; gap:4px; } .key { margin-top:8px; } }
+  </style>
+</head>
+<body>
+  <h1>Luxe WKDownload 原生附件下载 POC</h1>
+  <p>独立验证 Home Assistant iOS App 内置 WKWebView 能否把 HTTP 附件导航交给 App 原生 WKDownload 下载管理器。本页不连接摄像机，不调用 Recording Manager，也不修改正式录像功能。</p>
+
+  <section class="panel">
+    <strong>测试数据</strong>
+    <div class="grid">
+      <div class="key">请求方式</div><div class="value">用户主动点击的同源 GET 导航</div>
+      <div class="key">文件大小</div><div class="value">16 MiB（16,777,216 bytes）</div>
+      <div class="key">响应类型</div><div class="value">application/octet-stream</div>
+      <div class="key">附件头</div><div class="value">Content-Disposition: attachment</div>
+      <div class="key">服务端生成</div><div class="value">64 KiB 分块实时生成，单请求有界内存</div>
+      <div class="key">持久化</div><div class="value">不写 NAS、HA /media 或 go2rtc 磁盘</div>
+      <div class="key">录像 / 缓存</div><div class="value">不连接摄像机；不使用 Blob、OPFS 或完整文件内存缓存</div>
+    </div>
+    <p class="status">预期：点击下载后，HA iOS App 应出现其原生下载管理器，并显示文件名与下载进度。</p>
+    <a class="button" href="./api/luxe/recording-poc/download" download="luxe-wkdownload-poc-16mib.bin">下载 16 MiB 测试文件</a>
+  </section>
+
+  <section class="panel">
+    <strong>如何判断结果</strong>
+    <p>1. 如果出现 Home Assistant 原生下载管理器，并显示文件名与下载进度，说明 WKDownload 路径已触发。</p>
+    <p>2. 下载完成后，使用原生分享入口将文件保存到「文件」App。文件应为 16 MiB。</p>
+    <p>3. 如果页面直接显示二进制乱码、空白页、HTTP 错误，或没有出现原生下载管理器，请截图并记录现象；不要据此判断 OPFS 写入失败。</p>
+    <p>4. 此测试只验证 WKDownload 接管 HTTP 附件，不代表 OPFS → go2rtc 流式中转已经实现。</p>
+    <p><a class="secondary" href="recording-opfs-poc.html">返回 OPFS 流式下载 POC</a></p>
+    <p><a class="secondary" href="recording-poc.html">返回 go2rtc 录像下载 POC</a></p>
+  </section>
+</body>
+</html>
