@@ -185,3 +185,94 @@ func ingressRequest(method, target string, body io.Reader) *http.Request {
 	request.Header.Set("X-Remote-User-Id", "user-1")
 	return request
 }
+
+
+func TestThreeOPFSRelaysCanStreamConcurrently(t *testing.T) {
+	m := newManager("http://127.0.0.1:1/api/auth/current")
+	type relayCase struct {
+		session *opfsRelaySession
+		payload []byte
+		response *httptest.ResponseRecorder
+		done chan struct{}
+	}
+	cases := make([]relayCase, 0, opfsRelayMaxSessions)
+	for i := 0; i < opfsRelayMaxSessions; i++ {
+		payload := make([]byte, opfsRelayChunkSize+31+i)
+		for index := range payload {
+			payload[index] = byte((index*13 + i*47) & 0xff)
+		}
+		filename := fmt.Sprintf("luxe-opfs-poc-%c-12345678-1234-1234-1234-123456789abc.bin", 'a'+i)
+		s, err := m.newOPFSRelay("user-1", filename, int64(len(payload)), crc32.ChecksumIEEE(payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := httptest.NewRecorder()
+		done := make(chan struct{})
+		downloadRequest := ingressRequest(http.MethodGet, "/api/luxe/recording-poc/relay/"+s.id+"/download", nil)
+		go func() {
+			defer close(done)
+			m.downloadOPFSRelay(response, downloadRequest, s)
+		}()
+		cases = append(cases, relayCase{session: s, payload: payload, response: response, done: done})
+	}
+	if _, err := m.newOPFSRelay("user-1", "luxe-opfs-poc-a-12345678-1234-1234-1234-123456789abc.bin", 1, 0); err == nil {
+		t.Fatal("fourth active relay should be rejected")
+	}
+
+	var wg sync.WaitGroup
+	errors := make(chan error, len(cases))
+	for _, item := range cases {
+		item := item
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for offset := 0; offset < len(item.payload); {
+				size := opfsRelayChunkSize
+				if remaining := len(item.payload) - offset; remaining < size {
+					size = remaining
+				}
+				body := item.payload[offset : offset+size]
+				request := ingressRequest(http.MethodPost,
+					"/api/luxe/recording-poc/relay/"+item.session.id+"/chunk?offset="+strconv.Itoa(offset),
+					bytes.NewReader(body))
+				request.ContentLength = int64(len(body))
+				response := httptest.NewRecorder()
+				m.uploadOPFSRelayChunk(response, request, item.session)
+				if response.Code != http.StatusOK {
+					errors <- fmt.Errorf("relay %s chunk %d: status=%d body=%s", item.session.id, offset, response.Code, response.Body.String())
+					return
+				}
+				offset += size
+			}
+			response := httptest.NewRecorder()
+			m.completeOPFSRelayUpload(response, item.session)
+			if response.Code != http.StatusOK {
+				errors <- fmt.Errorf("relay %s complete: status=%d body=%s", item.session.id, response.Code, response.Body.String())
+			}
+		}()
+	}
+	wg.Wait()
+	close(errors)
+	for err := range errors {
+		t.Error(err)
+	}
+	for _, item := range cases {
+		select {
+		case <-item.done:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("relay %s download did not finish", item.session.id)
+		}
+		if !bytes.Equal(item.response.Body.Bytes(), item.payload) {
+			t.Errorf("relay %s payload mismatch", item.session.id)
+		}
+		item.session.mu.Lock()
+		complete := item.session.uploadComplete && item.session.downloadComplete &&
+			item.session.uploadedBytes == int64(len(item.payload)) &&
+			item.session.downloadedBytes == int64(len(item.payload))
+		item.session.mu.Unlock()
+		if !complete {
+			t.Errorf("relay %s did not finish independently", item.session.id)
+		}
+		m.expireOPFSRelay(item.session.id)
+	}
+}
