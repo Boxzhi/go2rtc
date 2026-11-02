@@ -206,7 +206,7 @@ func TestDownloadCookieIsPathScopedAndSingleUse(t *testing.T) {
 
 	streamReq := httptest.NewRequest(http.MethodGet, downloadURL, nil)
 	streamReq.AddCookie(cookie)
-	ctx, cancel := context.WithCancel(streamReq.Context())
+	_, cancel := context.WithCancel(streamReq.Context())
 	defer cancel()
 
 	claimed, status, err := m.claimDownload(streamReq, s.ID, cancel)
@@ -214,7 +214,7 @@ func TestDownloadCookieIsPathScopedAndSingleUse(t *testing.T) {
 		t.Fatalf("first stream claim failed: session=%v status=%d err=%v", claimed, status, err)
 	}
 
-	secondCtx, secondCancel := context.WithCancel(streamReq.Context())
+	_, secondCancel := context.WithCancel(streamReq.Context())
 	defer secondCancel()
 	if _, status, err = m.claimDownload(streamReq, s.ID, secondCancel); err == nil || status != http.StatusConflict {
 		t.Fatalf("second stream claim should be rejected, status=%d err=%v", status, err)
@@ -230,7 +230,7 @@ func TestInvalidDownloadCookieIsRejected(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/luxe/recordings/"+s.ID+"/stream", nil)
 	req.AddCookie(&http.Cookie{Name: downloadCookieName(s.ID), Value: "not-the-token"})
-	ctx, cancel := context.WithCancel(req.Context())
+	_, cancel := context.WithCancel(req.Context())
 	defer cancel()
 
 	if _, status, err := m.claimDownload(req, s.ID, cancel); err == nil || status != http.StatusUnauthorized {
