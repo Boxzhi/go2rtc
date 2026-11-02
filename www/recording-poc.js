@@ -92,7 +92,22 @@
         failed: "录像失败：" + (status.error || "未知错误"),
         expired: "任务已过期"
       };
-      setStatus(row, labels[status.state] || status.state);
+      const bytes = Number(status.bytes_sent) || 0;
+      const size = bytes >= 1048576
+        ? (bytes / 1048576).toFixed(1) + " MiB"
+        : (bytes / 1024).toFixed(1) + " KiB";
+      const seconds = status.started_at
+        ? Math.max(0, Math.floor((Date.now() - Date.parse(status.started_at)) / 1000))
+        : 0;
+      const duration = String(Math.floor(seconds / 60)).padStart(2, "0")
+        + ":" + String(seconds % 60).padStart(2, "0");
+      const details = bytes > 0
+        ? " · " + duration + " · 已传输 " + size
+        : "";
+      const finalNote = status.state === "stopped"
+        ? " · 请到浏览器下载管理器确认文件已保存"
+        : "";
+      setStatus(row, (labels[status.state] || status.state) + details + finalNote);
       if (["stopped", "interrupted", "failed", "expired"].includes(status.state)) {
         row.querySelector('[data-action="download"]').disabled = true;
         row.querySelector('[data-action="stop"]').disabled = true;
