@@ -85,6 +85,12 @@
     <p class="file-status status">尚未写入</p>
   </section>
 
+  <section class="panel" id="recovery-panel" hidden>
+    <strong>发现遗留 OPFS 临时文件</strong>
+    <p>这些文件可能来自上次测试中断。请确认不再需要后再清理。</p>
+    <div id="recovery-list"></div>
+  </section>
+
   <section class="panel">
     <strong>测试说明</strong>
     <p>1. 点击「三路并发写入」，三个 Dedicated Worker 会分别向 OPFS 写入测试数据，不把完整文件放进 JavaScript 内存。</p>
