@@ -51,6 +51,23 @@ For each row, create a session, then click **Start download**. Repeat for the ot
 
 The POC intentionally uses normal browser navigation for the MP4 response. It does not use `fetch(response.body)`, Blob, OPFS, or a JavaScript download queue. The POC must be verified in Safari, Home Assistant iOS App, and desktop browsers before the official UI is migrated.
 
+## OPFS stop-then-download browser POC
+
+Open `/recording-opfs-poc.html` through the same Add-on Ingress page, or use the link from `/recording-poc.html`.
+
+This is a **client-side storage/download transport test only**. It writes deterministic `.bin` sample data, not camera video, and does not call the Go Recording Manager API.
+
+- A separate Dedicated Worker per sample writes fixed-size chunks into OPFS using `FileSystemSyncAccessHandle`.
+- A Dedicated Worker reads OPFS chunks for download; it does not call `FileSystemFileHandle.getFile()`.
+- A MessageChannel transfers bounded chunks to the Service Worker. The Service Worker only exposes a streaming `ReadableStream` attachment response and does not access OPFS.
+- The transfer uses backpressure: the Service Worker requests one chunk when the browser stream pulls.
+- CRC32 and exact byte count are checked before the response is marked complete.
+- No `Blob`, `File`, `URL.createObjectURL()`, `arrayBuffer()`, full-file JavaScript buffer, server-side file, or NAS/HA write is used.
+- Download stream completion is not proof that the operating system saved the file. The test page therefore requires the user to check the browser download manager before manually cleaning the OPFS file.
+- The POC uses three independent sample files to exercise concurrent writes and downloads. It does not yet test actual camera MP4, iOS background execution, or automatic cleanup after a native download.
+
+This POC is the prerequisite for the future stop-then-download architecture. Do not connect it to the live camera stream or migrate the production UI until Safari and Home Assistant iOS App tests pass.
+
 ## Home Assistant connectivity
 
 The token-validation URL used for direct/non-Ingress requests is `http://homeassistant:8123/api/auth/current`. It can be changed in go2rtc configuration:
@@ -76,7 +93,7 @@ Authentication fails closed if Home Assistant cannot validate a direct caller's 
 9. Camera audio remains present while the live preview is muted.
 10. iPhone Safari, Home Assistant iOS App, Mac QuickTime and desktop browser playback are tested with actual HLC7 files.
 11. Add-on restart, client disconnect and Home Assistant auth timeout release sessions cleanly.
-12. No GPAC service, custom component, server-side recording file, Blob/OPFS buffer or `/media` write access is needed.
+12. No GPAC service, custom component, server-side recording file, Blob/full-file memory buffer or `/media` write access is needed. The separate OPFS POC may use device-local temporary storage only; it must never write recordings to NAS, HAOS, or go2rtc server storage.
 
 **This branch is development only. Do not deploy or publish a production release until CI and HAOS real-device tests pass.**
 
