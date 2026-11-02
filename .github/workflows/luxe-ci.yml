@@ -26,18 +26,13 @@ jobs:
           go-version: '1.27'
           cache: true
 
-      - name: Check browser recording POC JavaScript syntax
-        run: |
-          node --check www/recording-poc.js
-          node --check www/recording-opfs-poc.js
-          node --check www/recording-opfs-worker.js
-          node --check www/recording-opfs-sw.js
-      - name: Check browser POC JavaScript syntax
+      - name: Set up Node.js for browser POC checks
         uses: actions/setup-node@v4
         with:
           node-version: '22'
       - name: Validate OPFS POC does not buffer files
         run: |
+          node --check www/recording-poc.js
           node --check www/recording-opfs-poc.js
           node --check www/recording-opfs-worker.js
           node --check www/recording-opfs-sw.js
