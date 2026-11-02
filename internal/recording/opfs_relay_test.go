@@ -21,7 +21,7 @@ func TestOPFSRelayStreamsChunksToNativeAttachment(t *testing.T) {
 		payload[i] = byte((i*17 + 23) & 0xff)
 	}
 	wantCRC := crc32.ChecksumIEEE(payload)
-	s, err := m.newOPFSRelay("user-1", "luxe-opfs-poc-a-test.bin", int64(len(payload)), wantCRC)
+	s, err := m.newOPFSRelay("user-1", "luxe-opfs-poc-a-12345678-1234-1234-1234-123456789abc.bin", int64(len(payload)), wantCRC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestOPFSRelayRejectsWrongOffsetAndCRC(t *testing.T) {
 	t.Run("wrong offset", func(t *testing.T) {
 		m := newManager("http://127.0.0.1:1/api/auth/current")
 		payload := []byte("small payload")
-		s, err := m.newOPFSRelay("user-1", "luxe-opfs-poc-b-test.bin", int64(len(payload)), crc32.ChecksumIEEE(payload))
+		s, err := m.newOPFSRelay("user-1", "luxe-opfs-poc-b-12345678-1234-1234-1234-123456789abc.bin", int64(len(payload)), crc32.ChecksumIEEE(payload))
 		if err != nil { t.Fatal(err) }
 		defer m.expireOPFSRelay(s.id)
 
@@ -109,7 +109,7 @@ func TestOPFSRelayRejectsWrongOffsetAndCRC(t *testing.T) {
 	t.Run("CRC mismatch", func(t *testing.T) {
 		m := newManager("http://127.0.0.1:1/api/auth/current")
 		payload := []byte("small payload")
-		s, err := m.newOPFSRelay("user-1", "luxe-opfs-poc-c-test.bin", int64(len(payload)), crc32.ChecksumIEEE([]byte("different")))
+		s, err := m.newOPFSRelay("user-1", "luxe-opfs-poc-c-12345678-1234-1234-1234-123456789abc.bin", int64(len(payload)), crc32.ChecksumIEEE([]byte("different")))
 		if err != nil { t.Fatal(err) }
 		defer m.expireOPFSRelay(s.id)
 
@@ -144,7 +144,7 @@ func TestOPFSRelayCreateEndpointReturnsIngressScopedURLs(t *testing.T) {
 	m := newManager("http://127.0.0.1:1/api/auth/current")
 	payload := []byte("test")
 	body, _ := json.Marshal(opfsRelayCreateRequest{
-		Filename: "luxe-opfs-poc-a-test.bin",
+		Filename: "luxe-opfs-poc-a-12345678-1234-1234-1234-123456789abc.bin",
 		SizeBytes: int64(len(payload)),
 		CRC32: fmt.Sprintf("%08x", crc32.ChecksumIEEE(payload)),
 	})
