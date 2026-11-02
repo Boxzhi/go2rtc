@@ -295,6 +295,7 @@
     const id = row.dataset.file;
     const record = records.get(id);
     if (!record || !record.ready) throw new Error("请先完成 OPFS 写入。");
+    if (record.downloading) throw new Error("该文件已经在下载中。");
     if (!navigator.serviceWorker.controller) throw new Error("当前页面没有受 Service Worker 控制，请先重新检测环境或刷新页面。");
 
     const downloadURL = new URL("./__luxe_opfs_download__/" + encodeURIComponent(record.fileName), location.href);
@@ -375,6 +376,11 @@
     try {
       const worker = new Worker(new URL("./recording-opfs-worker.js", location.href));
       downloadWorkers.set(message.fileName, worker);
+      worker.onerror = error => {
+        setGlobalError("OPFS 读取 Worker 异常：" + (error.message || "未知错误"));
+        worker.terminate();
+        downloadWorkers.delete(message.fileName);
+      };
       worker.postMessage({ type: "read", fileName: message.fileName, port }, [port]);
       return true;
     } catch (error) {
