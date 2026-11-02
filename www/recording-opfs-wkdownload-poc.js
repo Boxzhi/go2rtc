@@ -85,15 +85,15 @@
     }
   }
 
-  function start(record) {
+  async function start(record) {
     if (!record.task || record.uploading || record.finished) return;
 
-    // Keep the attachment navigation in the user's tap handler so WKDownload
-    // can take ownership before the background OPFS uploader starts.
+    // Match the already-tested WKDownload POC: a same-window, user-initiated
+    // attachment link with a download attribute. WKDownload owns the response,
+    // so the current Ingress page remains available for the OPFS uploader.
     const anchor = document.createElement("a");
     anchor.href = new URL(record.task.download_url, location.origin).href;
-    anchor.target = "_blank";
-    anchor.rel = "noopener";
+    anchor.download = record.task.filename || record.fileName;
     anchor.hidden = true;
     document.body.appendChild(anchor);
     anchor.click();
@@ -101,8 +101,29 @@
 
     record.uploading = true;
     updateButtons(record);
-    setCardStatus(record, "已发起 WKDownload。Dedicated Worker 正在从 OPFS 分块上传…");
+    setCardStatus(record, "已触发附件下载，正在等待 go2rtc 确认 WKDownload 请求…");
 
+    try {
+      const deadline = Date.now() + 15000;
+      let accepted = false;
+      while (Date.now() < deadline) {
+        const state = await requestJSON(record.task.status_url);
+        if (state.error) throw new Error(state.error);
+        if (state.download_started) {
+          accepted = true;
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+      if (!accepted) throw new Error("15 秒内 go2rtc 未收到下载请求。请检查原生下载界面后重试。");
+    } catch (error) {
+      record.uploading = false;
+      setCardStatus(record, "下载请求未确认：" + error.message + "。尚未开始上传，OPFS 文件保留。");
+      updateButtons(record);
+      return;
+    }
+
+    setCardStatus(record, "WKDownload 已接入。Dedicated Worker 正在从 OPFS 分块上传…");
     const worker = new Worker(new URL("./recording-opfs-relay-worker.js", location.href));
     workers.set(record.fileName, worker);
     worker.onmessage = event => {
