@@ -4,6 +4,7 @@
   const MiB = 1024 * 1024;
   const CHANNEL_NAME = "luxe-opfs-poc";
   const rows = [...document.querySelectorAll("[data-file]")];
+  const recoveryList = document.getElementById("recovery-list");
   const envStatus = document.getElementById("env-status");
   const quotaStatus = document.getElementById("quota-status");
   const swStatus = document.getElementById("sw-status");
@@ -12,6 +13,8 @@
   const workers = new Map();
   const records = new Map();
   let serviceWorkerRegistration = null;
+  let recoveryScanned = false;
+  let recoveredIndex = 0;
 
   function formatBytes(value) {
     if (value >= MiB) return (value / MiB).toFixed(1) + " MiB";
@@ -23,9 +26,10 @@
   }
 
   function updateRowButtons(row, record) {
-    row.querySelector('[data-action="write"]').disabled = !!record.writing;
-    row.querySelector('[data-action="download"]').disabled = !record.ready || !!record.downloading;
-    row.querySelector('[data-action="cleanup"]').disabled = !record.fileName || !!record.writing || !!record.downloading;
+    const state = record || {};
+    row.querySelector('[data-action="write"]').disabled = !!state.writing || !!state.fileName;
+    row.querySelector('[data-action="download"]').disabled = !state.ready || !!state.downloading;
+    row.querySelector('[data-action="cleanup"]').disabled = !state.fileName || !!state.writing || !!state.downloading;
   }
 
   function makeFileName(id) {
@@ -92,6 +96,75 @@
     return true;
   }
 
+  function makeRecoveredRow(fileName, sizeBytes) {
+    recoveredIndex += 1;
+    const recordId = "recovered-" + recoveredIndex;
+    const row = document.createElement("section");
+    row.className = "file";
+    row.dataset.file = recordId;
+    row.dataset.recovered = "true";
+
+    const head = document.createElement("div");
+    head.className = "file-head";
+    const title = document.createElement("h2");
+    title.textContent = "恢复的临时文件 " + recoveredIndex;
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.textContent = "OPFS 恢复";
+    head.append(title, tag);
+
+    const description = document.createElement("p");
+    description.className = "muted";
+    description.textContent = fileName + " · " + formatBytes(sizeBytes);
+
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    actions.innerHTML = '<button data-action="write" disabled>写入测试文件</button><button data-action="download" class="secondary">下载文件</button><button data-action="cleanup" class="danger">清理临时文件</button>';
+
+    const status = document.createElement("p");
+    status.className = "file-status status";
+    status.textContent = "发现上次测试遗留的 OPFS 文件，可重新下载或清理。";
+
+    row.append(head, description, actions, status);
+    recoveryList.appendChild(row);
+
+    const record = {
+      fileName,
+      row,
+      writing: false,
+      ready: true,
+      downloading: false,
+      streamComplete: false,
+      sizeBytes,
+      recovered: true
+    };
+    records.set(recordId, record);
+    bindRow(row);
+    updateRowButtons(row, record);
+  }
+
+  async function recoverExistingFiles() {
+    if (recoveryScanned) return;
+    recoveryScanned = true;
+    if (!navigator.storage || !navigator.storage.getDirectory) return;
+
+    try {
+      const root = await navigator.storage.getDirectory();
+      for await (const [name, handle] of root.entries()) {
+        if (!/^luxe-opfs-poc-[abc]-[0-9a-f-]+\.bin$/.test(name)) continue;
+        const alreadyKnown = [...records.values()].some(record => record.fileName === name);
+        if (alreadyKnown) continue;
+        const file = await handle.getFile();
+        makeRecoveredRow(name, file.size);
+      }
+      if (recoveryList.childElementCount) {
+        document.getElementById("recovery-panel").hidden = false;
+      }
+    } catch (error) {
+      globalStatus.textContent += " · 扫描遗留文件失败：" + error.message;
+    }
+  }
+
   async function inspectEnvironment() {
     const secure = window.isSecureContext;
     const opfs = !!(navigator.storage && navigator.storage.getDirectory);
@@ -109,6 +182,7 @@
       try {
         await registerServiceWorker();
         globalStatus.textContent = "环境检测通过。可以开始 OPFS 写入测试。";
+        await recoverExistingFiles();
       } catch (error) {
         globalStatus.textContent = "环境检测未通过：" + error.message;
         swStatus.textContent = "Service Worker：注册或控制失败。";
@@ -121,11 +195,15 @@
   function startWrite(row) {
     const id = row.dataset.file;
     const previous = records.get(id);
-    if (previous && previous.writing) return;
+    if (previous && previous.fileName) {
+      setRowStatus(row, "请先清理当前 OPFS 临时文件，再开始新的写入。");
+      return;
+    }
 
     const fileName = makeFileName(id);
     const record = {
       fileName,
+      row,
       writing: true,
       ready: false,
       downloading: false,
@@ -191,7 +269,7 @@
 
     // This ordinary navigation is initiated synchronously by the user's click.
     // The Service Worker returns the OPFS file as a chunked attachment stream.
-    const downloadURL = new URL("./" + "__luxe_opfs_download__/" + encodeURIComponent(record.fileName), location.href);
+    const downloadURL = new URL("./__luxe_opfs_download__/" + encodeURIComponent(record.fileName), location.href);
     const anchor = document.createElement("a");
     anchor.href = downloadURL.href;
     anchor.target = "_blank";
@@ -216,17 +294,21 @@
     const root = await navigator.storage.getDirectory();
     await root.removeEntry(record.fileName);
     records.delete(id);
-    updateRowButtons(row, {});
-    setRowStatus(row, "OPFS 临时文件已删除。");
+    if (row.dataset.recovered === "true") {
+      row.remove();
+      if (!recoveryList.childElementCount) document.getElementById("recovery-panel").hidden = true;
+    } else {
+      setRowStatus(row, "OPFS 临时文件已删除。");
+      updateRowButtons(row, {});
+    }
     await refreshQuota();
   }
 
   function handleServiceWorkerMessage(message) {
     if (!message || !message.fileName) return;
     const record = [...records.values()].find(item => item.fileName === message.fileName);
-    if (!record) return;
-    const row = rows.find(item => item.dataset.file === message.fileName.split("-")[3]);
-    if (!row) return;
+    if (!record || !record.row) return;
+    const row = record.row;
 
     if (message.type === "download-stream-complete") {
       record.downloading = false;
@@ -242,8 +324,9 @@
     updateRowButtons(row, record);
   }
 
-  for (const row of rows) {
-    row.querySelector('[data-action="write"]').addEventListener("click", () => startWrite(row));
+  function bindRow(row) {
+    const writeButton = row.querySelector('[data-action="write"]');
+    if (writeButton) writeButton.addEventListener("click", () => startWrite(row));
     row.querySelector('[data-action="download"]').addEventListener("click", () => {
       try { startDownload(row); }
       catch (error) { setRowStatus(row, "下载失败：" + error.message); }
@@ -254,6 +337,8 @@
     });
   }
 
+  for (const row of rows) bindRow(row);
+
   document.getElementById("write-all").addEventListener("click", () => {
     for (const row of rows) startWrite(row);
   });
@@ -262,7 +347,8 @@
   if ("BroadcastChannel" in window) {
     const channel = new BroadcastChannel(CHANNEL_NAME);
     channel.addEventListener("message", event => handleServiceWorkerMessage(event.data));
-  } else {
+  }
+  if ("serviceWorker" in navigator) {
     navigator.serviceWorker.addEventListener("message", event => handleServiceWorkerMessage(event.data));
   }
 
