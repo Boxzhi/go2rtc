@@ -5,40 +5,17 @@
   const authStatus = document.getElementById("auth-status");
   const rows = [...document.querySelectorAll(".camera")];
 
-  function getHass() {
-    const roots = [window, window.parent, window.top];
-    for (const root of roots) {
-      try {
-        const host = root.document && root.document.querySelector("home-assistant");
-        if (host && host.hass) return host.hass;
-        if (root.hass) return root.hass;
-      } catch (_) {}
-    }
-    return null;
-  }
-
-  function getToken() {
-    const hass = getHass();
-    return hass && hass.auth && hass.auth.data && hass.auth.data.access_token
-      ? hass.auth.data.access_token
-      : "";
-  }
-
   function setStatus(row, message) {
     row.querySelector(".status").textContent = message;
   }
 
   async function apiRequest(path, options = {}) {
-    const token = getToken();
-    if (!token) throw new Error("无法读取 Home Assistant access token。请从 Home Assistant 的 Add-on Ingress 面板打开本页面。");
-
-    const headers = Object.assign({}, options.headers || {}, {
-      Authorization: "Bearer " + token
-    });
+    // The Supervisor authenticates the Ingress request and supplies
+    // X-Remote-User-Id to go2rtc. No access token is exposed to this page.
     const response = await fetch(apiBase + path, Object.assign({
       credentials: "same-origin",
       cache: "no-store"
-    }, options, { headers }));
+    }, options));
 
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || ("HTTP " + response.status));
@@ -158,10 +135,14 @@
     });
   }
 
-  const token = getToken();
-  authStatus.textContent = token
-    ? "Home Assistant 授权已就绪。可分别创建三路任务，并独立启动三路下载。"
-    : "未检测到 Home Assistant 授权。请通过 Add-on Ingress 面板打开本页面。";
+  // Query the authenticated API instead of reaching into the parent HA
+  // frontend (which is unreliable in iOS HA App / sandboxed Ingress frames).
+  authStatus.textContent = "正在验证 Ingress 用户身份…";
+  apiRequest("").then(() => {
+    authStatus.textContent = "Ingress 用户身份验证成功。可以独立创建三路录像任务。";
+  }).catch(error => {
+    authStatus.textContent = "Ingress 验证失败：" + error.message + "。请从 HA Add-on Ingress 打开测试页。";
+  });
 
   window.setInterval(() => {
     // Poll all sessions concurrently; there is no media-download queue.
