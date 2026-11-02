@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -289,5 +290,62 @@ func TestTransportDropStopsOnlyAffectedSession(t *testing.T) {
 	m.finish(one, nil, ctxOne.Err())
 	if one.State != stateFailed || one.Error != "packet loss" {
 		t.Fatalf("packet-loss session should fail: state=%q error=%q", one.State, one.Error)
+	}
+}
+
+
+func TestThreeRecordingDownloadsCanBeClaimedConcurrently(t *testing.T) {
+	m := newManager("http://127.0.0.1")
+	type claimInput struct {
+		id  string
+		req *http.Request
+	}
+	inputs := make([]claimInput, 0, maxSessions)
+
+	for i := 0; i < maxSessions; i++ {
+		source := fmt.Sprintf("camera-%d", i+1)
+		s, err := m.create(source, source+".mp4", "user-1", &streams.Stream{})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		startReq := httptest.NewRequest(http.MethodPost, "/api/luxe/recordings/start", nil)
+		startReq.Header.Set("X-Ingress-Path", "/api/hassio_ingress/test-token/")
+		downloadURL := m.downloadURL(startReq, s.ID)
+		response := httptest.NewRecorder()
+		if err = m.setDownloadCookie(response, startReq, s, downloadURL); err != nil {
+			t.Fatal(err)
+		}
+
+		streamReq := httptest.NewRequest(http.MethodGet, downloadURL, nil)
+		streamReq.AddCookie(response.Result().Cookies()[0])
+		inputs = append(inputs, claimInput{id: s.ID, req: streamReq})
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(inputs))
+	for _, input := range inputs {
+		input := input
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, cancel := context.WithCancel(input.req.Context())
+			defer cancel()
+
+			s, status, err := m.claimDownload(input.req, input.id, cancel)
+			if err != nil {
+				errs <- fmt.Errorf("claim %s failed with status %d: %w", input.id, status, err)
+				return
+			}
+			if s.State != stateStarting {
+				errs <- fmt.Errorf("claim %s state = %q, want %q", input.id, s.State, stateStarting)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Error(err)
 	}
 }
