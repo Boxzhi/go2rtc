@@ -1,6 +1,7 @@
 package mp4
 
 import (
+	"context"
 	"errors"
 	"io"
 	"sync"
@@ -200,4 +201,30 @@ func (c *Consumer) DropCount() int {
 		total += sender.DropCount()
 	}
 	return total
+}
+
+// Drain closes the inbound media senders and waits for already-queued RTP
+// packets to be muxed. The recording handler calls this on a normal stop
+// BEFORE removing this consumer, so the final fMP4 fragments can reach the
+// browser. It does not buffer a recording on the server.
+//
+// A disconnected/slow client must supply a bounded context; the caller then
+// forcibly removes the consumer if draining times out.
+func (c *Consumer) Drain(ctx context.Context) error {
+	for _, sender := range c.Senders {
+		sender.Close()
+	}
+	finished := make(chan struct{})
+	go func() {
+		for _, sender := range c.Senders {
+			sender.Wait()
+		}
+		close(finished)
+	}()
+	select {
+	case <-finished:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
