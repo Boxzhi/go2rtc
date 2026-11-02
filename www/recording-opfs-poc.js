@@ -10,6 +10,7 @@
   const globalStatus = document.getElementById("global-status");
   const sizeSelect = document.getElementById("size-mib");
   const workers = new Map();
+  const downloadWorkers = new Map();
   const records = new Map();
   let serviceWorkerRegistration = null;
   let recoveryScanned = false;
@@ -356,6 +357,13 @@
     } else if (message.type === "download-stream-error") {
       record.downloading = false;
       setRowStatus(row, "下载流错误：" + message.message + "。OPFS 文件已保留。");
+    } else {
+      return;
+    }
+    const readerWorker = downloadWorkers.get(message.fileName);
+    if (readerWorker) {
+      readerWorker.terminate();
+      downloadWorkers.delete(message.fileName);
     }
     updateRowButtons(row, record);
   }
@@ -364,9 +372,21 @@
     const message = event.data || {};
     if (message.type !== "LUXE_OPFS_DOWNLOAD_REQUEST" || !event.ports || !event.ports[0]) return false;
     const port = event.ports[0];
-    const worker = new Worker(new URL("./recording-opfs-worker.js", location.href));
-    worker.postMessage({ type: "read", fileName: message.fileName, port }, [port]);
-    return true;
+    try {
+      const worker = new Worker(new URL("./recording-opfs-worker.js", location.href));
+      downloadWorkers.set(message.fileName, worker);
+      worker.postMessage({ type: "read", fileName: message.fileName, port }, [port]);
+      return true;
+    } catch (error) {
+      try { port.postMessage({ type: "error", message: error.message || String(error) }); } catch (_) {}
+      try { port.close(); } catch (_) {}
+      setGlobalError("无法启动 OPFS 读取 Worker：" + error.message);
+      return true;
+    }
+  }
+
+  function setGlobalError(message) {
+    globalStatus.textContent = message;
   }
 
   function bindRow(row) {
