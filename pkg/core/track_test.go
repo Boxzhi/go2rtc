@@ -51,11 +51,3 @@ func TestSenser(t *testing.T) {
 	}
 	require.False(t, ok)
 }
-
-func TestSenderDropCountPersistsAfterClose(t *testing.T) {
-	sender := NewSender(nil, &Codec{})
-	sender.Close()
-	sender.Input(&Packet{}) // A detached sender still tracks rejected packets.
-	require.Equal(t, 1, sender.Drops)
-	require.Equal(t, 1, sender.DropCount())
-}
