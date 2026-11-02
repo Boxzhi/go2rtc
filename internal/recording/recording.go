@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -74,6 +75,7 @@ type session struct {
 	CookiePath        string
 	CookieSecure      bool
 	StreamClaimed     bool
+	BytesSent         atomic.Int64 // HTTP response bytes; not buffered recording data
 }
 
 type sessionView struct {
@@ -83,6 +85,7 @@ type sessionView struct {
 	State      string     `json:"state"`
 	Error      string     `json:"error,omitempty"`
 	StopReason string     `json:"stop_reason,omitempty"`
+	BytesSent  int64      `json:"bytes_sent"`
 	CreatedAt  time.Time  `json:"created_at"`
 	StartedAt  *time.Time `json:"started_at,omitempty"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
@@ -416,7 +419,11 @@ func (m *manager) stream(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	w.WriteHeader(http.StatusOK)
 
-	writer := &flushWriter{ResponseWriter: w, onFirstMedia: func() { m.markMediaStarted(s) }}
+	writer := &flushWriter{
+		ResponseWriter: w,
+		onFirstMedia: func() { m.markMediaStarted(s) },
+		onBytes: func(n int) { s.BytesSent.Add(int64(n)) },
+	}
 	_, writeErr := consumer.WriteTo(writer)
 	ctxErr := ctx.Err()
 	cancel()
@@ -666,6 +673,7 @@ func viewOf(s *session) sessionView {
 		State:      s.State,
 		Error:      s.Error,
 		StopReason: s.StopReason,
+		BytesSent:  s.BytesSent.Load(),
 		CreatedAt:  s.CreatedAt,
 	}
 	if !s.StartedAt.IsZero() {
@@ -691,6 +699,7 @@ func writeError(w http.ResponseWriter, status int, message string) {
 type flushWriter struct {
 	http.ResponseWriter
 	onFirstMedia func()
+	onBytes func(int)
 	writes int
 	mediaWritten bool
 }
@@ -698,6 +707,7 @@ type flushWriter struct {
 func (w *flushWriter) Write(p []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(p)
 	if n > 0 {
+		if w.onBytes != nil { w.onBytes(n) }
 		w.writes++
 		// The first mp4.Consumer.WriteTo call writes the fMP4 init segment;
 		// its subsequent writes carry actual media fragments.
