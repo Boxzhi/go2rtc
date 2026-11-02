@@ -394,3 +394,42 @@ func TestNoMediaAndDrainTimeoutAreFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestIngressAuthenticationRequiresTrustedSupervisorPeer(t *testing.T) {
+	m := newManager("http://127.0.0.1:1/api/auth/current")
+	req := httptest.NewRequest(http.MethodGet, "/api/luxe/recordings", nil)
+	req.RemoteAddr = "172.30.32.2:54210"
+	req.Header.Set("X-Ingress-Path", "/api/hassio_ingress/sample-session-token")
+	req.Header.Set("X-Remote-User-Id", "real-user")
+	user, status, err := m.authenticate(req)
+	if err != nil || status != 0 || user.ID != "real-user" {
+		t.Fatalf("trusted supervisor identity rejected: user=%v status=%d err=%v", user, status, err)
+	}
+
+	// The identity header is untrusted on public 1984 connections.
+	req.RemoteAddr = "192.168.1.30:54210"
+	if _, status, err := m.authenticate(req); err == nil || status != http.StatusUnauthorized {
+		t.Fatalf("spoofed peer accepted: status=%d err=%v", status, err)
+	}
+}
+
+func TestIngressWithoutUserIDFailsClosed(t *testing.T) {
+	m := newManager("http://127.0.0.1:1/api/auth/current")
+	req := httptest.NewRequest(http.MethodGet, "/api/luxe/recordings", nil)
+	req.RemoteAddr = "172.30.32.2:54210"
+	req.Header.Set("X-Ingress-Path", "/api/hassio_ingress/sample-session-token")
+	if _, status, err := m.authenticate(req); err == nil || status != http.StatusUnauthorized {
+		t.Fatalf("unidentified ingress user accepted: status=%d err=%v", status, err)
+	}
+}
+
+func TestForgedIngressPrefixDoesNotAuthorizeDirectCaller(t *testing.T) {
+	m := newManager("http://127.0.0.1:1/api/auth/current")
+	req := httptest.NewRequest(http.MethodGet, "/api/luxe/recordings", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("X-Ingress-Path", "/api/hassio_ingress/sample-session-token")
+	req.Header.Set("X-Remote-User-Id", "attacker")
+	if _, status, err := m.authenticate(req); err == nil || status != http.StatusUnauthorized {
+		t.Fatalf("forged localhost identity accepted: status=%d err=%v", status, err)
+	}
+}
