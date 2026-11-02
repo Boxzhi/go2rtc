@@ -350,3 +350,47 @@ func TestThreeRecordingDownloadsCanBeClaimedConcurrently(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// A connected MP4 Consumer first writes an initialization segment. The UI
+// must not show REC until a subsequent media fragment reached the download.
+func TestRecordingBecomesActiveOnlyAfterFirstMedia(t *testing.T) {
+	m := newManager("http://127.0.0.1")
+	s, err := m.create("camera", "test.mp4", "user", &streams.Stream{})
+	if err != nil { t.Fatal(err) }
+	m.mu.Lock()
+	s.State = stateStarting
+	m.mu.Unlock()
+
+	writer := &flushWriter{ResponseWriter: httptest.NewRecorder(), onFirstMedia: func() { m.markMediaStarted(s) }}
+	if _, err := writer.Write([]byte("ftyp-moov-init")); err != nil { t.Fatal(err) }
+	if writer.mediaWritten { t.Fatal("initialization segment cannot count as media") }
+	m.mu.Lock()
+	state, started := s.State, s.StartedAt
+	m.mu.Unlock()
+	if state != stateStarting || !started.IsZero() { t.Fatalf("unexpected status after init: %s %v", state, started) }
+	if _, err := writer.Write([]byte("moof-mdat-frame")); err != nil { t.Fatal(err) }
+	if !writer.mediaWritten { t.Fatal("media output was not detected") }
+	m.mu.Lock()
+	state, started = s.State, s.StartedAt
+	m.mu.Unlock()
+	if state != stateRecording || started.IsZero() { t.Fatalf("first frame must start recording: %s %v", state, started) }
+}
+
+func TestNoMediaAndDrainTimeoutAreFailures(t *testing.T) {
+	for _, reason := range []string{"no_media", "drain_timeout"} {
+		t.Run(reason, func(t *testing.T) {
+			m := newManager("http://127.0.0.1")
+			s, err := m.create("camera", "test.mp4", "user", &streams.Stream{})
+			if err != nil { t.Fatal(err) }
+			m.mu.Lock()
+			s.State = stateStopping
+			s.StopReason = "user"
+			m.mu.Unlock()
+			m.noteStreamFailure(s, reason, "not a valid complete recording")
+			m.finish(s, nil, context.Canceled)
+			if s.State != stateFailed || s.StopReason != reason {
+				t.Fatalf("state=%q reason=%q", s.State, s.StopReason)
+			}
+		})
+	}
+}
