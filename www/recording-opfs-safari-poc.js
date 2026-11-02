@@ -193,8 +193,8 @@
 
   async function inspectEnvironment() {
     const userAgent = navigator.userAgent || "";
-    const isSafari = /Safari\\//.test(userAgent) &&
-      /Version\\//.test(userAgent) &&
+    const isSafari = /Safari\//.test(userAgent) &&
+      /Version\//.test(userAgent) &&
       !/(CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo)/.test(userAgent);
     const secure = window.isSecureContext;
     const opfs = !!(navigator.storage && navigator.storage.getDirectory);
