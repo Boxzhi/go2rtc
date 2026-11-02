@@ -62,6 +62,7 @@ async function serveOPFSFile(event, fileName, finishLifetime) {
   let pendingPullResolve = null;
   let finished = false;
   let sentBytes = 0;
+  let handshakeTimer = null;
 
   const finish = () => {
     if (finished) return;
@@ -71,16 +72,27 @@ async function serveOPFSFile(event, fileName, finishLifetime) {
       pendingPullResolve = null;
       resolve();
     }
+    if (handshakeTimer !== null) clearTimeout(handshakeTimer);
     try { channel.port1.close(); } catch (_) {}
     finishLifetime();
   };
 
   const body = new ReadableStream({
     start(controller) {
+      handshakeTimer = setTimeout(() => {
+        if (finished) return;
+        controller.error(new Error("OPFS 读取 Worker 启动超时"));
+        notify(client, "download-stream-error", fileName, { message: "OPFS 读取 Worker 启动超时" });
+        finish();
+      }, 10000);
       channel.port1.onmessage = messageEvent => {
         const data = messageEvent.data || {};
 
         if (data.type === "ready") {
+          if (handshakeTimer !== null) {
+            clearTimeout(handshakeTimer);
+            handshakeTimer = null;
+          }
           if (Number(data.sizeBytes) !== expectedSize) {
             try { channel.port1.postMessage({ type: "cancel" }); } catch (_) {}
             controller.error(new Error("OPFS 文件大小与下载请求不一致"));
