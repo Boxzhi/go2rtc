@@ -27,6 +27,8 @@ jobs:
           cache: true
       - name: Test affected packages
         run: go test -count=1 ./internal/recording ./pkg/h265 ./pkg/iso ./pkg/mp4 ./pkg/xiaomi/miss/...
+      - name: Race-test parallel recording sessions
+        run: go test -race -count=1 ./internal/recording ./pkg/mp4
       - name: Build all packages
         run: go build ./...
       - name: Build Linux AMD64 binary
