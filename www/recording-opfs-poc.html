@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <title>Luxe OPFS 流式下载 POC</title>
+  <style>
+    :root { color-scheme:dark; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#111827; color:#e5e7eb; }
+    body { margin:0; padding:22px; max-width:960px; margin-inline:auto; }
+    h1 { margin:0 0 8px; font-size:22px; }
+    h2 { margin:0; font-size:16px; }
+    p { color:#9ca3af; line-height:1.6; }
+    .panel,.file { border:1px solid #374151; border-radius:13px; background:#1f2937; padding:15px; margin:12px 0; }
+    .status { color:#93c5fd; font-size:13px; line-height:1.6; overflow-wrap:anywhere; }
+    .muted { color:#9ca3af; font-size:12px; }
+    .toolbar,.actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+    button,select { border:0; border-radius:8px; padding:10px 13px; font-weight:600; }
+    button { background:#2563eb; color:#fff; cursor:pointer; }
+    button.secondary { background:#374151; }
+    button.danger { background:#991b1b; }
+    button:disabled { opacity:.4; cursor:not-allowed; }
+    select { background:#111827; color:#f9fafb; border:1px solid #4b5563; }
+    .file-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .tag { font-size:11px; border-radius:99px; padding:4px 8px; background:#164e63; color:#a5f3fc; }
+    a { color:#93c5fd; }
+    @media(max-width:600px) { body { padding:15px; } .file-head { align-items:flex-start; flex-direction:column; } }
+  </style>
+  <script src="recording-opfs-poc.js" defer></script>
+</head>
+<body>
+  <h1>Luxe OPFS 流式下载 POC</h1>
+  <p>独立验证当前设备 OPFS 分块写入，以及 Service Worker 将 OPFS 文件作为原生附件流下载。此页面不连接摄像机、不调用 Recording Manager，也不修改正式录像功能。</p>
+
+  <section class="panel">
+    <strong>环境检测</strong>
+    <p id="env-status" class="status">正在检测浏览器能力…</p>
+    <p id="sw-status" class="status">Service Worker：尚未注册</p>
+    <p id="quota-status" class="muted">正在读取本地存储配额…</p>
+    <p id="global-status" class="status">准备中…</p>
+    <div class="toolbar">
+      <label class="muted">每路测试文件大小
+        <select id="size-mib">
+          <option value="8">8 MiB</option>
+          <option value="16" selected>16 MiB</option>
+          <option value="32">32 MiB</option>
+          <option value="64">64 MiB</option>
+        </select>
+      </label>
+      <button id="detect" class="secondary">重新检测环境</button>
+      <button id="write-all">三路并发写入</button>
+    </div>
+  </section>
+
+  <section class="file" data-file="a">
+    <div class="file-head"><h2>测试文件 A</h2><span class="tag">独立 Worker A</span></div>
+    <p class="muted">模拟客厅移动 3K 的本地录像缓存。</p>
+    <div class="actions">
+      <button data-action="write">写入测试文件</button>
+      <button data-action="download" class="secondary" disabled>下载文件</button>
+      <button data-action="cleanup" class="danger" disabled>清理临时文件</button>
+    </div>
+    <p class="file-status status">尚未写入</p>
+  </section>
+
+  <section class="file" data-file="b">
+    <div class="file-head"><h2>测试文件 B</h2><span class="tag">独立 Worker B</span></div>
+    <p class="muted">模拟客厅固定 3K 的本地录像缓存。</p>
+    <div class="actions">
+      <button data-action="write">写入测试文件</button>
+      <button data-action="download" class="secondary" disabled>下载文件</button>
+      <button data-action="cleanup" class="danger" disabled>清理临时文件</button>
+    </div>
+    <p class="file-status status">尚未写入</p>
+  </section>
+
+  <section class="file" data-file="c">
+    <div class="file-head"><h2>测试文件 C</h2><span class="tag">独立 Worker C</span></div>
+    <p class="muted">模拟餐厅 2K 的本地录像缓存。</p>
+    <div class="actions">
+      <button data-action="write">写入测试文件</button>
+      <button data-action="download" class="secondary" disabled>下载文件</button>
+      <button data-action="cleanup" class="danger" disabled>清理临时文件</button>
+    </div>
+    <p class="file-status status">尚未写入</p>
+  </section>
+
+  <section class="panel">
+    <strong>测试说明</strong>
+    <p>1. 点击「三路并发写入」，三个 Dedicated Worker 会分别向 OPFS 写入测试数据，不把完整文件放进 JavaScript 内存。</p>
+    <p>2. 写入完成后，分别点击「下载文件」。Service Worker 通过 OPFS 文件流返回附件，不构造 Blob、不创建 Object URL。</p>
+    <p>3. 下载流完整结束后，页面只会提示「浏览器已读取完整数据流」，这不等同于操作系统已确认保存。请先检查下载管理器，再手动清理 OPFS 文件。</p>
+    <p>4. 本测试使用 .bin 文件验证流式下载，不代表 MP4 编码兼容性。实际摄像机 MP4 将在后续接入测试。</p>
+    <p><a href="recording-poc.html">返回 go2rtc 录像下载 POC</a></p>
+  </section>
+</body>
+</html>
