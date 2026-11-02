@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
+	"net/netip"
 	"net/http"
 	"net/url"
 	"path"
@@ -178,7 +180,31 @@ func recordingRoute(requestPath string) string {
 	return strings.Trim(tail, "/")
 }
 
+// isSupervisorIngress trusts only the Home Assistant Supervisor ingress peer,
+// not spoofable X-Forwarded-* headers or requests arriving on port 1984 from
+// other network clients. Supervisor itself strips and replaces X-Remote-User-Id.
+func isSupervisorIngress(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil { return false }
+	addr, err := netip.ParseAddr(host)
+	if err != nil || addr.Unmap() != netip.MustParseAddr("172.30.32.2") { return false }
+	path := strings.TrimSuffix(strings.TrimSpace(r.Header.Get("X-Ingress-Path")), "/")
+	if !strings.HasPrefix(path, "/api/hassio_ingress/") { return false }
+	token := strings.TrimPrefix(path, "/api/hassio_ingress/")
+	return token != "" && !strings.ContainsAny(token, "/\\\\.")
+}
+
 func (m *manager) authenticate(r *http.Request) (*haUser, int, error) {
+	// Native Ingress has already authenticated the user. Do not require the
+	// embedded POC page to extract a HA access token from its parent window.
+	if isSupervisorIngress(r) {
+		if id := strings.TrimSpace(r.Header.Get("X-Remote-User-Id")); id != "" {
+			return &haUser{ID: id}, 0, nil
+		}
+		return nil, http.StatusUnauthorized, errors.New("Ingress session does not identify a Home Assistant user")
+	}
+	// Non-Ingress callers must still present a HA Bearer token, validated
+	// against Home Assistant Core. Never accept X-Remote-User-Id from LAN.
 	header := strings.TrimSpace(r.Header.Get("Authorization"))
 	scheme, token, ok := strings.Cut(header, " ")
 	if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
