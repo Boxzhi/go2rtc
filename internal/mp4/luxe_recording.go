@@ -3,7 +3,6 @@ package mp4
 // Luxe direct-to-client recording proof of concept.
 // No media bytes are retained on the server; each download owns one HTTP response.
 import (
- "encoding/json"
  "errors"
  "mime"
  "net/http"
@@ -15,7 +14,6 @@ import (
 
  "github.com/AlexxIT/go2rtc/internal/api"
  "github.com/AlexxIT/go2rtc/internal/streams"
- "github.com/AlexxIT/go2rtc/pkg/core"
  mp4pkg "github.com/AlexxIT/go2rtc/pkg/mp4"
 )
 
@@ -179,6 +177,7 @@ func luxeRecordStream(w http.ResponseWriter,r *http.Request){
  }
  // The stop API must end the consumer rather than cancel the download request.
  stopped:=make(chan string,1)
+ writerDone:=make(chan struct{})
  go func(){
   timer:=time.NewTimer(time.Duration(duration)*time.Second)
   defer timer.Stop()
@@ -187,6 +186,7 @@ func luxeRecordStream(w http.ResponseWriter,r *http.Request){
   case <-t.stopCh:
   case <-timer.C: reason="time_limit"
   case <-r.Context().Done(): reason="disconnected"
+  case <-writerDone: reason="writer_finished"
   }
   luxeSetStatus(t,"stopping")
   stream.RemoveConsumer(cons)
@@ -199,6 +199,7 @@ func luxeRecordStream(w http.ResponseWriter,r *http.Request){
  w.Header().Set("X-Accel-Buffering","no")
  writer:=&luxeRecordingWriter{ResponseWriter:w,task:t}
  _,writeErr:=cons.WriteTo(writer)
+ close(writerDone)
  // A normal stream closure should make the existing WriteBuffer.WriteTo return;
  // only request-context cancellation is an interrupted client download.
  reason:=<-stopped
@@ -212,8 +213,3 @@ func luxeRecordStream(w http.ResponseWriter,r *http.Request){
  }
 }
 
-// Expose only status metadata. No video files, filesystem writes, or blobs.
-func luxeRecordDebugJSON(t *luxeRecordTask) []byte {
- b,_:=json.Marshal(luxeSnapshot(t))
- return b
-}
