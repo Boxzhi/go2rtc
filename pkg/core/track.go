@@ -154,6 +154,12 @@ func (s *Sender) Wait() {
 	}
 }
 
+func (s *Sender) DropCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Drops
+}
+
 func (s *Sender) State() string {
 	if s.buf == nil {
 		return "closed"

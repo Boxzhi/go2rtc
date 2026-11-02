@@ -189,3 +189,15 @@ func (c *Consumer) WriteTo(wr io.Writer) (int64, error) {
 
 	return c.wr.WriteTo(wr)
 }
+
+
+// DropCount returns the total number of packets dropped by this MP4 consumer's
+// sender queues. Recording sessions use it to fail closed rather than silently
+// deliver a potentially incomplete file.
+func (c *Consumer) DropCount() int {
+	var total int
+	for _, sender := range c.Senders {
+		total += sender.DropCount()
+	}
+	return total
+}

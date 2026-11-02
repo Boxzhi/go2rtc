@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -349,6 +350,25 @@ func (m *manager) stream(w http.ResponseWriter, r *http.Request, id string) {
 		close(cleanupDone)
 	}()
 
+	dropMonitorDone := make(chan struct{})
+	go func() {
+		defer close(dropMonitorDone)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if dropped := consumer.DropCount(); dropped > 0 {
+					message := fmt.Sprintf("MP4 transport dropped %d packets; recording stopped to avoid an incomplete file", dropped)
+					m.requestFailure(s.ID, "transport_drops", message)
+					return
+				}
+			}
+		}
+	}()
+
 	w.Header().Set("Content-Type", "video/mp4")
 	w.Header().Set("Cache-Control", "no-store, no-transform")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -362,6 +382,7 @@ func (m *manager) stream(w http.ResponseWriter, r *http.Request, id string) {
 	ctxErr := ctx.Err()
 	cancel()
 	<-cleanupDone
+	<-dropMonitorDone
 
 	m.finish(s, writeErr, ctxErr)
 	if writeErr != nil && ctxErr == nil {
@@ -419,6 +440,29 @@ func (m *manager) requestStop(id, reason string) {
 	}
 }
 
+func (m *manager) requestFailure(id, reason, message string) {
+	m.mu.Lock()
+	s := m.sessions[id]
+	if s == nil {
+		m.mu.Unlock()
+		return
+	}
+
+	var cancel context.CancelFunc
+	switch s.State {
+	case stateStarting, stateRecording:
+		s.State = stateStopping
+		s.StopReason = reason
+		s.Error = message
+		cancel = s.Cancel
+	}
+	m.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+}
+
 func (m *manager) status(w http.ResponseWriter, user *haUser, id string) {
 	s, err := m.getOwned(id, user.ID)
 	if err != nil {
@@ -464,6 +508,11 @@ func (m *manager) finish(s *session, writeErr, ctxErr error) {
 	defer m.mu.Unlock()
 
 	switch {
+	case s.StopReason == "transport_drops":
+		s.State = stateFailed
+		if s.Error == "" {
+			s.Error = "recording stopped after transport packet loss"
+		}
 	case ctxErr != nil && s.StopReason == "":
 		s.State = stateInterrupted
 		s.StopReason = "client_disconnect"

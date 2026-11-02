@@ -23,6 +23,7 @@ The Go recording manager owns the **session lifecycle only**. It does not store 
 - Maximum 30 minutes per session, enforced by the Go server.
 - Camera audio is requested with `mp4=all`; it does not follow the live player mute state.
 - No frontend download queue: each camera has an independent download request.
+- Sender queue packet drops are monitored; any detected loss fails only that session instead of silently producing a potentially incomplete MP4.
 - Session metadata expires after completion; pending sessions expire if no stream request starts.
 - Recording bytes are streamed to the browser; no server-side recording directory, OPFS, Blob buffering, or `/media` write permission is required.
 

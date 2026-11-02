@@ -254,3 +254,40 @@ func TestClientDisconnectMarksSessionInterrupted(t *testing.T) {
 		t.Fatalf("stop reason = %q, want client_disconnect", s.StopReason)
 	}
 }
+
+
+func TestTransportDropStopsOnlyAffectedSession(t *testing.T) {
+	m := newManager("http://127.0.0.1")
+	one, err := m.create("camera-1", "one.mp4", "user-1", &streams.Stream{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := m.create("camera-2", "two.mp4", "user-1", &streams.Stream{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctxOne, cancelOne := context.WithCancel(context.Background())
+	defer cancelOne()
+	ctxTwo, cancelTwo := context.WithCancel(context.Background())
+	defer cancelTwo()
+
+	one.State = stateRecording
+	one.Cancel = cancelOne
+	two.State = stateRecording
+	two.Cancel = cancelTwo
+
+	m.requestFailure(one.ID, "transport_drops", "packet loss")
+
+	if one.State != stateStopping || ctxOne.Err() != context.Canceled {
+		t.Fatalf("affected session was not stopped: state=%q context=%v", one.State, ctxOne.Err())
+	}
+	if two.State != stateRecording || ctxTwo.Err() != nil {
+		t.Fatalf("unrelated session was affected: state=%q context=%v", two.State, ctxTwo.Err())
+	}
+
+	m.finish(one, nil, ctxOne.Err())
+	if one.State != stateFailed || one.Error != "packet loss" {
+		t.Fatalf("packet-loss session should fail: state=%q error=%q", one.State, one.Error)
+	}
+}
