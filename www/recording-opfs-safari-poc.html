@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <title>Luxe Safari OPFS 三路并发下载 POC</title>
+  <style>
+    :root { color-scheme:dark; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#111827; color:#e5e7eb; }
+    body { margin:0; padding:22px; max-width:960px; margin-inline:auto; }
+    h1 { margin:0 0 8px; font-size:22px; }
+    h2 { margin:0; font-size:16px; }
+    p { color:#9ca3af; line-height:1.6; }
+    .panel,.file { border:1px solid #374151; border-radius:13px; background:#1f2937; padding:15px; margin:12px 0; }
+    .status { color:#93c5fd; font-size:13px; line-height:1.6; overflow-wrap:anywhere; }
+    .muted { color:#9ca3af; font-size:12px; }
+    .toolbar,.actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+    button,select { border:0; border-radius:8px; padding:10px 13px; font-weight:600; }
+    button { background:#2563eb; color:#fff; cursor:pointer; }
+    button.secondary { background:#374151; }
+    button.danger { background:#991b1b; }
+    button:disabled { opacity:.4; cursor:not-allowed; }
+    select { background:#111827; color:#f9fafb; border:1px solid #4b5563; }
+    .file-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .tag { font-size:11px; border-radius:99px; padding:4px 8px; background:#164e63; color:#a5f3fc; }
+    a { color:#93c5fd; }
+    @media(max-width:600px) { body { padding:15px; } .file-head { align-items:flex-start; flex-direction:column; } }
+  </style>
+  <script src="recording-opfs-poc.js" defer></script>
+</head>
+<body>
+  <h1>Luxe Safari OPFS 三路并发下载 POC</h1>
+  <p>专门在 Safari 中验证当前 iPhone / iPad / Mac 的 OPFS 临时文件、Service Worker 流式附件，以及三个独立文件能否同时进入 Safari 下载管理器。请从 HA App 点击入口后，在系统浏览器 Safari 中完成本页全部测试。</p>
+
+  <section class="panel">
+    <strong>Safari 环境检测</strong>
+    <p id="env-status" class="status">正在检测浏览器能力…</p>
+    <p id="sw-status" class="status">Service Worker：尚未注册</p>
+    <p id="quota-status" class="muted">正在读取本地存储配额…</p>
+    <p id="global-status" class="status">准备中…</p>
+    <div class="toolbar">
+      <label class="muted">每路测试文件大小
+        <select id="size-mib">
+          <option value="8">8 MiB</option>
+          <option value="16" selected>16 MiB</option>
+          <option value="32">32 MiB</option>
+          <option value="64">64 MiB</option>
+        </select>
+      </label>
+      <button id="detect" class="secondary">重新检测环境</button>
+      <button id="write-all">三路并发写入</button>
+    </div>
+  </section>
+
+  <section class="file" data-file="a">
+    <div class="file-head"><h2>测试文件 A</h2><span class="tag">独立 Worker A</span></div>
+    <p class="muted">模拟客厅移动 3K 的本地录像缓存。</p>
+    <div class="actions">
+      <button data-action="write">写入测试文件</button>
+      <button data-action="download" class="secondary" disabled>下载文件</button>
+      <button data-action="cleanup" class="danger" disabled>清理临时文件</button>
+    </div>
+    <p class="file-status status">尚未写入</p>
+  </section>
+
+  <section class="file" data-file="b">
+    <div class="file-head"><h2>测试文件 B</h2><span class="tag">独立 Worker B</span></div>
+    <p class="muted">模拟客厅固定 3K 的本地录像缓存。</p>
+    <div class="actions">
+      <button data-action="write">写入测试文件</button>
+      <button data-action="download" class="secondary" disabled>下载文件</button>
+      <button data-action="cleanup" class="danger" disabled>清理临时文件</button>
+    </div>
+    <p class="file-status status">尚未写入</p>
+  </section>
+
+  <section class="file" data-file="c">
+    <div class="file-head"><h2>测试文件 C</h2><span class="tag">独立 Worker C</span></div>
+    <p class="muted">模拟餐厅 2K 的本地录像缓存。</p>
+    <div class="actions">
+      <button data-action="write">写入测试文件</button>
+      <button data-action="download" class="secondary" disabled>下载文件</button>
+      <button data-action="cleanup" class="danger" disabled>清理临时文件</button>
+    </div>
+    <p class="file-status status">尚未写入</p>
+  </section>
+
+  <section class="panel" id="recovery-panel" hidden>
+    <strong>发现遗留 OPFS 临时文件</strong>
+    <p>这些文件可能来自上次测试中断。请确认不再需要后再清理。</p>
+    <div id="recovery-list"></div>
+  </section>
+
+  <section class="panel">
+    <strong>测试说明</strong>
+    <p>1. <b>先在 Safari 本页</b>点击「三路并发写入」。不要在 HA App 内先写入，因为 HA App WebView 与 Safari 的 OPFS 存储相互隔离。</p>
+    <p>2. 三路写入完成后，分别点击 A、B、C 的「下载文件」。每次点击都必须是独立的用户操作；不要用脚本自动连点。建议在 A 下载开始后，立即再点 B、C。</p>
+    <p>3. Safari 若首次询问是否允许来自此网站的多个下载，请允许。保持本页打开，观察三路各自的下载流进度和完成状态。</p>
+    <p>4. 打开 Safari 下载管理器，确认 A、B、C 三个文件都出现且最终均显示完成。页面显示流读取完成不等于系统文件已保存。</p>
+    <p>5. 只有确认三个下载文件均已保存后，才分别点击对应的「清理临时文件」。取消或失败的任务保留 OPFS 文件，可重试。</p>
+    <p>6. 本测试使用独立 16 MiB 默认合成 .bin 文件验证下载，不代表 MP4 编码兼容性。下一阶段再接入真实录像 MP4。</p>
+    <p><a href="recording-opfs-poc.html">返回通用 OPFS 测试页</a></p>
+    <p><a href="recording-poc.html">返回 go2rtc 录像下载 POC</a></p>
+  </section>
+</body>
+</html>

@@ -23,7 +23,8 @@ async function findSourceClient(event) {
     client.id !== event.resultingClientId &&
     client.url.startsWith(self.registration.scope)
   );
-  return candidates.find(client => client.url.includes("recording-opfs-poc.html")) ||
+  return candidates.find(client => client.url.includes("recording-opfs-safari-poc.html")) ||
+    candidates.find(client => client.url.includes("recording-opfs-poc.html")) ||
     candidates[0] || null;
 }
 

@@ -55,3 +55,13 @@ The existing recording-poc.html links to this page. The add-on's Ingress entry r
 | iPad Safari | Device test | Device test | Device test | Device test |
 
 No production Recording Manager behavior is changed by this POC.
+
+
+## Safari three-file download POC
+
+- `www/recording-opfs-safari-poc.html` is a separate Safari-only page for testing three independent browser-native attachment downloads from local OPFS.
+- Open the page in Safari itself. Do not write the files inside the HA iOS App first: the app's WKWebView and Safari have separate browser storage contexts.
+- The page writes three synthetic files locally using independent Dedicated Workers. Each user tap starts one separate attachment download; tap A, then B, then C to test overlap. The page does not auto-trigger multiple downloads, avoiding browser popup/download gesture restrictions.
+- The Safari page uses the existing Service Worker + MessageChannel + Dedicated Worker streaming path. The Service Worker returns the attachment response, while the Dedicated Worker reads the OPFS file in bounded 256 KiB chunks. No Blob, File, Object URL, or whole-file JS buffer is created.
+- Confirm all three files independently appear in Safari's Downloads list and finish. A stream reaching EOF is not a guaranteed OS file-saved callback; clean OPFS only after verifying all saved files.
+- The Safari test does not use the go2rtc relay or HA iOS App's WKDownload manager. It validates local OPFS-to-Safari download only. Real camera MP4 integration and background/locked-device behavior remain separate tests.

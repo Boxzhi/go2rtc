@@ -34,11 +34,12 @@ jobs:
         run: |
           node --check www/recording-poc.js
           node --check www/recording-opfs-poc.js
+          node --check www/recording-opfs-safari-poc.js
           node --check www/recording-opfs-worker.js
           node --check www/recording-opfs-sw.js
           node --check www/recording-opfs-relay-worker.js
           node --check www/recording-opfs-wkdownload-poc.js
-          ! grep -Eqi 'new[[:space:]]+Blob|createObjectURL|arrayBuffer[(]' www/recording-opfs-poc.js www/recording-opfs-worker.js www/recording-opfs-sw.js www/recording-opfs-relay-worker.js www/recording-opfs-wkdownload-poc.js
+          ! grep -Eqi 'new[[:space:]]+Blob|createObjectURL|arrayBuffer[(]' www/recording-opfs-poc.js www/recording-opfs-safari-poc.js www/recording-opfs-worker.js www/recording-opfs-sw.js www/recording-opfs-relay-worker.js www/recording-opfs-wkdownload-poc.js
       - name: Test affected packages
         run: go test -count=1 ./internal/recording ./pkg/h265 ./pkg/iso ./pkg/mp4 ./pkg/xiaomi/miss/...
       - name: Race-test parallel recording sessions
