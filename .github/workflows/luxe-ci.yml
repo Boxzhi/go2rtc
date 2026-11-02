@@ -25,6 +25,16 @@ jobs:
         with:
           go-version: '1.27'
           cache: true
+      - name: Check browser POC JavaScript syntax
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate OPFS POC does not buffer files
+        run: |
+          node --check www/recording-opfs-poc.js
+          node --check www/recording-opfs-worker.js
+          node --check www/recording-opfs-sw.js
+          ! grep -Eqi 'new[[:space:]]+Blob|createObjectURL|arrayBuffer\\(' www/recording-opfs-poc.js www/recording-opfs-worker.js www/recording-opfs-sw.js
       - name: Test affected packages
         run: go test -count=1 ./internal/recording ./pkg/h265 ./pkg/iso ./pkg/mp4 ./pkg/xiaomi/miss/...
       - name: Race-test parallel recording sessions
