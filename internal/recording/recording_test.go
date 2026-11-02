@@ -433,3 +433,20 @@ func TestForgedIngressPrefixDoesNotAuthorizeDirectCaller(t *testing.T) {
 		t.Fatalf("forged localhost identity accepted: status=%d err=%v", status, err)
 	}
 }
+
+func TestRecordingByteCounterTracksHTTPOutputWithoutStoringMedia(t *testing.T) {
+	m := newManager("http://127.0.0.1")
+	s, err := m.create("camera", "test.mp4", "user", &streams.Stream{})
+	if err != nil { t.Fatal(err) }
+	writer := &flushWriter{
+		ResponseWriter: httptest.NewRecorder(),
+		onFirstMedia: func() { m.markMediaStarted(s) },
+		onBytes: func(n int) { s.BytesSent.Add(int64(n)) },
+	}
+	_, _ = writer.Write([]byte("init"))
+	_, _ = writer.Write([]byte("frame"))
+	m.mu.Lock()
+	view := viewOf(s)
+	m.mu.Unlock()
+	if view.BytesSent != 9 { t.Fatalf("bytes_sent=%d want 9", view.BytesSent) }
+}
