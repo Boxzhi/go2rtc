@@ -11,19 +11,24 @@ self.addEventListener("activate", event => {
   event.waitUntil(self.clients.claim());
 });
 
-function notify(message) {
+function notify(message, clientId) {
   try {
     const channel = new BroadcastChannel(CHANNEL_NAME);
     channel.postMessage(message);
     channel.close();
   } catch (_) {}
+  if (clientId) {
+    self.clients.get(clientId).then(client => {
+      if (client) client.postMessage(message);
+    }).catch(() => {});
+  }
 }
 
 function safeFileName(value) {
   return /^luxe-opfs-poc-[abc]-[0-9a-f-]+\.bin$/.test(value);
 }
 
-async function serveOPFSFile(fileName) {
+async function serveOPFSFile(fileName, clientId) {
   if (!safeFileName(fileName)) {
     return new Response("Invalid test file name", { status: 400 });
   }
@@ -52,7 +57,7 @@ async function serveOPFSFile(fileName) {
             type: "download-stream-complete",
             fileName,
             sizeBytes: file.size
-          });
+          }, clientId);
           return;
         }
         controller.enqueue(result.value);
@@ -62,7 +67,7 @@ async function serveOPFSFile(fileName) {
           type: "download-stream-error",
           fileName,
           message: error && error.message ? error.message : String(error)
-        });
+        }, clientId);
       }
     },
     async cancel(reason) {
@@ -71,7 +76,7 @@ async function serveOPFSFile(fileName) {
         notify({
           type: "download-stream-cancelled",
           fileName
-        });
+        }, clientId);
       }
     }
   });
@@ -99,5 +104,5 @@ self.addEventListener("fetch", event => {
   const relativePath = requestURL.pathname.slice(scopeURL.pathname.length);
   if (!relativePath.startsWith(DOWNLOAD_PREFIX)) return;
 
-  event.respondWith(serveOPFSFile(decodeURIComponent(relativePath.slice(DOWNLOAD_PREFIX.length))));
+  event.respondWith(serveOPFSFile(decodeURIComponent(relativePath.slice(DOWNLOAD_PREFIX.length)), event.clientId || event.resultingClientId));
 });
