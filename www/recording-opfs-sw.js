@@ -1,7 +1,6 @@
 "use strict";
 
 const DOWNLOAD_PREFIX = "__luxe_opfs_download__/";
-const CHANNEL_NAME = "luxe-opfs-poc";
 
 self.addEventListener("install", event => {
   event.waitUntil(self.skipWaiting());
@@ -11,86 +10,182 @@ self.addEventListener("activate", event => {
   event.waitUntil(self.clients.claim());
 });
 
-function notify(message, clientId) {
+async function findSourceClient(event) {
+  const sourceId = event.clientId || event.resultingClientId;
+  if (sourceId) {
+    const source = await self.clients.get(sourceId);
+    if (source) return source;
+  }
+  const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  return clients.find(client => client.url.startsWith(self.registration.scope)) || null;
+}
+
+function notify(client, type, fileName, detail) {
   try {
-    const channel = new BroadcastChannel(CHANNEL_NAME);
-    channel.postMessage(message);
-    channel.close();
+    client.postMessage(Object.assign({ type, fileName }, detail || {}));
   } catch (_) {}
-  if (clientId) {
-    self.clients.get(clientId).then(client => {
-      if (client) client.postMessage(message);
-    }).catch(() => {});
-  }
 }
 
-function safeFileName(value) {
-  return /^luxe-opfs-poc-[abc]-[0-9a-f-]+\.bin$/.test(value);
-}
-
-async function serveOPFSFile(fileName, clientId) {
-  if (!safeFileName(fileName)) {
-    return new Response("Invalid test file name", { status: 400 });
+async function serveOPFSFile(event, fileName, finishLifetime) {
+  if (!/^luxe-opfs-poc-[abc]-[0-9a-f-]+\.bin$/.test(fileName)) {
+    finishLifetime();
+    return new Response("Invalid OPFS test file name", { status: 400 });
   }
 
-  let fileHandle;
-  let file;
+  const requestURL = new URL(event.request.url);
+  const expectedSize = Number(requestURL.searchParams.get("size"));
+  const expectedCRC = String(requestURL.searchParams.get("crc32") || "").toLowerCase();
+  if (!Number.isSafeInteger(expectedSize) || expectedSize <= 0 || !/^[a-f0-9]{8}$/.test(expectedCRC)) {
+    finishLifetime();
+    return new Response("Missing or invalid OPFS file metadata", { status: 400 });
+  }
+
+  let client;
   try {
-    const root = await navigator.storage.getDirectory();
-    fileHandle = await root.getFileHandle(fileName);
-    file = await fileHandle.getFile();
+    client = await findSourceClient(event);
   } catch (_) {
-    return new Response("OPFS test file not found", { status: 404 });
+    client = null;
+  }
+  if (!client) {
+    finishLifetime();
+    return new Response("The OPFS POC page is no longer available", { status: 410 });
   }
 
-  const reader = file.stream().getReader();
+  const channel = new MessageChannel();
+  let pendingPullResolve = null;
   let finished = false;
+  let sentBytes = 0;
+
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    if (pendingPullResolve) {
+      const resolve = pendingPullResolve;
+      pendingPullResolve = null;
+      resolve();
+    }
+    try { channel.port1.close(); } catch (_) {}
+    finishLifetime();
+  };
 
   const body = new ReadableStream({
-    async pull(controller) {
-      try {
-        const result = await reader.read();
-        if (result.done) {
-          finished = true;
-          controller.close();
-          notify({
-            type: "download-stream-complete",
-            fileName,
-            sizeBytes: file.size
-          }, clientId);
+    start(controller) {
+      channel.port1.onmessage = messageEvent => {
+        const data = messageEvent.data || {};
+
+        if (data.type === "ready") {
+          if (Number(data.sizeBytes) !== expectedSize) {
+            try { channel.port1.postMessage({ type: "cancel" }); } catch (_) {}
+            controller.error(new Error("OPFS 文件大小与下载请求不一致"));
+            notify(client, "download-stream-error", fileName, { message: "OPFS 文件大小不一致" });
+            finish();
+          }
           return;
         }
-        controller.enqueue(result.value);
-      } catch (error) {
-        controller.error(error);
-        notify({
-          type: "download-stream-error",
-          fileName,
-          message: error && error.message ? error.message : String(error)
-        }, clientId);
-      }
+
+        if (data.type === "chunk") {
+          const bytes = new Uint8Array(data.buffer);
+          const count = Number(data.bytes) || bytes.byteLength;
+          if (count !== bytes.byteLength) {
+            controller.error(new Error("OPFS 分块长度不一致"));
+            notify(client, "download-stream-error", fileName, { message: "OPFS 分块长度不一致" });
+            finish();
+            return;
+          }
+          sentBytes += count;
+          controller.enqueue(bytes);
+          notify(client, "download-stream-progress", fileName, {
+            bytes: sentBytes,
+            totalBytes: expectedSize
+          });
+          if (pendingPullResolve) {
+            const resolve = pendingPullResolve;
+            pendingPullResolve = null;
+            resolve();
+          }
+          return;
+        }
+
+        if (data.type === "done") {
+          const valid = Number(data.sizeBytes) === expectedSize &&
+            String(data.crc32).toLowerCase() === expectedCRC &&
+            sentBytes === expectedSize;
+          if (valid) {
+            controller.close();
+            notify(client, "download-stream-complete", fileName, {
+              sizeBytes: sentBytes,
+              crc32: data.crc32,
+              checksumVerified: true
+            });
+          } else {
+            controller.error(new Error("OPFS 下载流 CRC32 或文件大小校验失败"));
+            notify(client, "download-stream-error", fileName, {
+              message: "CRC32 或文件大小校验失败",
+              bytes: sentBytes,
+              totalBytes: expectedSize
+            });
+          }
+          finish();
+          return;
+        }
+
+        if (data.type === "error") {
+          controller.error(new Error(data.message || "OPFS 文件读取失败"));
+          notify(client, "download-stream-error", fileName, { message: data.message || "OPFS 文件读取失败" });
+          finish();
+          return;
+        }
+
+        if (data.type === "cancelled") {
+          notify(client, "download-stream-cancelled", fileName, {
+            bytes: sentBytes,
+            totalBytes: expectedSize
+          });
+          finish();
+        }
+      };
+      channel.port1.start();
     },
-    async cancel(reason) {
-      if (!finished) {
-        try { await reader.cancel(reason); } catch (_) {}
-        notify({
-          type: "download-stream-cancelled",
-          fileName
-        }, clientId);
-      }
+    pull() {
+      if (finished) return;
+      return new Promise(resolve => {
+        pendingPullResolve = resolve;
+        try {
+          channel.port1.postMessage({ type: "pull" });
+        } catch (error) {
+          resolve();
+          notify(client, "download-stream-error", fileName, {
+            message: error && error.message ? error.message : String(error)
+          });
+          finish();
+        }
+      });
+    },
+    cancel(reason) {
+      try { channel.port1.postMessage({ type: "cancel", reason: String(reason || "") }); } catch (_) {}
+      notify(client, "download-stream-cancelled", fileName, { bytes: sentBytes, totalBytes: expectedSize });
+      finish();
     }
   });
 
-  const headers = new Headers({
-    "Content-Type": "application/octet-stream",
-    "Content-Length": String(file.size),
-    "Content-Disposition": 'attachment; filename="' + fileName + '"',
-    "Cache-Control": "no-store, no-cache, must-revalidate",
-    "Pragma": "no-cache",
-    "X-Content-Type-Options": "nosniff"
-  });
+  try {
+    client.postMessage({ type: "LUXE_OPFS_DOWNLOAD_REQUEST", fileName }, [channel.port2]);
+  } catch (error) {
+    finish();
+    return new Response("Could not connect to the OPFS reader worker", { status: 503 });
+  }
 
-  return new Response(body, { status: 200, headers });
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "Content-Length": String(expectedSize),
+      "Content-Disposition": 'attachment; filename="' + fileName + '"',
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      "Pragma": "no-cache",
+      "X-Content-Type-Options": "nosniff"
+    }
+  });
 }
 
 self.addEventListener("fetch", event => {
@@ -98,11 +193,14 @@ self.addEventListener("fetch", event => {
 
   const requestURL = new URL(event.request.url);
   const scopeURL = new URL(self.registration.scope);
-  if (requestURL.origin !== scopeURL.origin) return;
-  if (!requestURL.pathname.startsWith(scopeURL.pathname)) return;
+  if (requestURL.origin !== scopeURL.origin || !requestURL.pathname.startsWith(scopeURL.pathname)) return;
 
   const relativePath = requestURL.pathname.slice(scopeURL.pathname.length);
   if (!relativePath.startsWith(DOWNLOAD_PREFIX)) return;
 
-  event.respondWith(serveOPFSFile(decodeURIComponent(relativePath.slice(DOWNLOAD_PREFIX.length)), event.clientId || event.resultingClientId));
+  const fileName = decodeURIComponent(relativePath.slice(DOWNLOAD_PREFIX.length));
+  let finishLifetime;
+  const lifetime = new Promise(resolve => { finishLifetime = resolve; });
+  event.waitUntil(lifetime);
+  event.respondWith(serveOPFSFile(event, fileName, finishLifetime));
 });
