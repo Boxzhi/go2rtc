@@ -124,6 +124,7 @@ func Init() {
 	m := newManager(cfg.Mod.AuthURL)
 	api.HandleFunc("api/luxe/recordings", m.handle)
 	api.HandleFunc("api/luxe/recordings/", m.handle)
+	api.HandleFunc("api/luxe/recording-poc/download", m.nativeDownloadPOC)
 	log.Info().Msg("Luxe recording-session API enabled")
 }
 
