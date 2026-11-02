@@ -2,7 +2,6 @@
   "use strict";
 
   const MiB = 1024 * 1024;
-  const CHANNEL_NAME = "luxe-opfs-poc";
   const rows = [...document.querySelectorAll("[data-file]")];
   const recoveryList = document.getElementById("recovery-list");
   const envStatus = document.getElementById("env-status");
@@ -33,7 +32,9 @@
   }
 
   function makeFileName(id) {
-    const suffix = (crypto.randomUUID ? crypto.randomUUID() : (Date.now().toString(16) + "-" + Math.random().toString(16).slice(2)));
+    const suffix = crypto.randomUUID
+      ? crypto.randomUUID()
+      : Date.now().toString(16) + "-" + Math.random().toString(16).slice(2);
     return "luxe-opfs-poc-" + id + "-" + suffix + ".bin";
   }
 
@@ -87,6 +88,7 @@
       scope: scopePath,
       updateViaCache: "none"
     });
+    await serviceWorkerRegistration.update().catch(() => {});
     await navigator.serviceWorker.ready;
     const controlled = await waitForController(8000);
     if (!controlled) {
@@ -96,7 +98,29 @@
     return true;
   }
 
-  function makeRecoveredRow(fileName, sizeBytes) {
+  function statFile(fileName) {
+    return new Promise((resolve, reject) => {
+      const worker = new Worker(new URL("./recording-opfs-worker.js", location.href));
+      const finish = () => worker.terminate();
+      worker.onmessage = event => {
+        const message = event.data || {};
+        if (message.type === "stat-complete") {
+          finish();
+          resolve({ sizeBytes: message.sizeBytes, crc32: message.crc32 });
+        } else if (message.type === "stat-error") {
+          finish();
+          reject(new Error(message.message || "无法读取遗留 OPFS 文件"));
+        }
+      };
+      worker.onerror = event => {
+        finish();
+        reject(new Error(event.message || "OPFS stat Worker 异常"));
+      };
+      worker.postMessage({ type: "stat", fileName });
+    });
+  }
+
+  function makeRecoveredRow(fileName, metadata) {
     recoveredIndex += 1;
     const recordId = "recovered-" + recoveredIndex;
     const row = document.createElement("section");
@@ -115,7 +139,7 @@
 
     const description = document.createElement("p");
     description.className = "muted";
-    description.textContent = fileName + " · " + formatBytes(sizeBytes);
+    description.textContent = fileName + " · " + formatBytes(metadata.sizeBytes);
 
     const actions = document.createElement("div");
     actions.className = "actions";
@@ -135,7 +159,8 @@
       ready: true,
       downloading: false,
       streamComplete: false,
-      sizeBytes,
+      sizeBytes: metadata.sizeBytes,
+      crc32: metadata.crc32,
       recovered: true
     };
     records.set(recordId, record);
@@ -150,12 +175,12 @@
 
     try {
       const root = await navigator.storage.getDirectory();
-      for await (const [name, handle] of root.entries()) {
+      for await (const [name] of root.entries()) {
         if (!/^luxe-opfs-poc-[abc]-[0-9a-f-]+\.bin$/.test(name)) continue;
         const alreadyKnown = [...records.values()].some(record => record.fileName === name);
         if (alreadyKnown) continue;
-        const file = await handle.getFile();
-        makeRecoveredRow(name, file.size);
+        const metadata = await statFile(name);
+        makeRecoveredRow(name, metadata);
       }
       if (recoveryList.childElementCount) {
         document.getElementById("recovery-panel").hidden = false;
@@ -174,14 +199,16 @@
       "安全上下文：" + (secure ? "支持" : "不支持"),
       "OPFS：" + (opfs ? "可用" : "不可用"),
       "Dedicated Worker：" + (worker ? "可用" : "不可用"),
-      "Service Worker：" + (sw ? "可用" : "不可用")
+      "Service Worker：" + (sw ? "可用" : "不可用"),
+      "OPFS 读取：" + "由 Dedicated Worker 执行，不使用 File / Blob"
     ].join(" · ");
     await refreshQuota();
+
     if (secure && opfs && worker && sw) {
       globalStatus.textContent = "基础 API 检测通过，正在注册 Service Worker…";
       try {
         await registerServiceWorker();
-        globalStatus.textContent = "环境检测通过。可以开始 OPFS 写入测试。";
+        globalStatus.textContent = "环境检测通过。OPFS 写入、Worker 分块读取和下载服务已就绪。";
         await recoverExistingFiles();
       } catch (error) {
         globalStatus.textContent = "环境检测未通过：" + error.message;
@@ -221,7 +248,8 @@
       const message = event.data || {};
       if (message.type === "progress") {
         const percent = Math.floor(message.writtenBytes / message.totalBytes * 100);
-        setRowStatus(row, "正在写入 " + formatBytes(message.writtenBytes) + " / " + formatBytes(message.totalBytes) + "（" + percent + "%）");
+        setRowStatus(row, "正在写入 " + formatBytes(message.writtenBytes) + " / " +
+          formatBytes(message.totalBytes) + "（" + percent + "%）");
         return;
       }
       if (message.type === "complete") {
@@ -229,7 +257,8 @@
         record.ready = true;
         record.sizeBytes = message.sizeBytes;
         record.crc32 = message.crc32;
-        setRowStatus(row, "OPFS 写入完成 · " + formatBytes(record.sizeBytes) + " · CRC32 " + record.crc32 + " · 等待下载");
+        setRowStatus(row, "OPFS 写入完成 · " + formatBytes(record.sizeBytes) +
+          " · CRC32 " + record.crc32 + " · 等待下载");
         worker.terminate();
         workers.delete(id);
         updateRowButtons(row, record);
@@ -267,14 +296,14 @@
     if (!record || !record.ready) throw new Error("请先完成 OPFS 写入。");
     if (!navigator.serviceWorker.controller) throw new Error("当前页面没有受 Service Worker 控制，请先重新检测环境或刷新页面。");
 
-    // This ordinary navigation is initiated synchronously by the user's click.
-    // The Service Worker returns the OPFS file as a chunked attachment stream.
     const downloadURL = new URL("./__luxe_opfs_download__/" + encodeURIComponent(record.fileName), location.href);
+    downloadURL.searchParams.set("size", String(record.sizeBytes));
+    downloadURL.searchParams.set("crc32", record.crc32);
+
     const anchor = document.createElement("a");
     anchor.href = downloadURL.href;
     anchor.target = "_blank";
     anchor.rel = "noopener";
-    anchor.download = record.fileName;
     anchor.hidden = true;
     document.body.appendChild(anchor);
     anchor.click();
@@ -282,7 +311,7 @@
 
     record.downloading = true;
     updateRowButtons(row, record);
-    setRowStatus(row, "已发起浏览器原生下载。请检查下载管理器；OPFS 文件暂不自动删除。");
+    setRowStatus(row, "已发起浏览器原生下载。OPFS 文件仍保留，等待下载流校验。");
   }
 
   async function cleanupFile(row) {
@@ -310,18 +339,34 @@
     if (!record || !record.row) return;
     const row = record.row;
 
+    if (message.type === "download-stream-progress") {
+      setRowStatus(row, "浏览器正在接收 " + formatBytes(message.bytes) + " / " +
+        formatBytes(message.totalBytes) + "（OPFS 分块读取）");
+      return;
+    }
+
     if (message.type === "download-stream-complete") {
       record.downloading = false;
       record.streamComplete = true;
-      setRowStatus(row, "浏览器已完整读取下载流（" + formatBytes(message.sizeBytes) + "）。请先确认下载文件已保存，再清理 OPFS。");
+      setRowStatus(row, "浏览器已完整读取下载流 · CRC32 校验通过 · " +
+        formatBytes(message.sizeBytes) + "。请确认下载管理器中已保存文件，再清理 OPFS。");
     } else if (message.type === "download-stream-cancelled") {
       record.downloading = false;
-      setRowStatus(row, "下载流被取消。OPFS 文件已保留，可以重试下载。");
+      setRowStatus(row, "下载流被取消。OPFS 文件已保留，可以重新下载。");
     } else if (message.type === "download-stream-error") {
       record.downloading = false;
-      setRowStatus(row, "下载流发生错误：" + message.message + "。OPFS 文件已保留。");
+      setRowStatus(row, "下载流错误：" + message.message + "。OPFS 文件已保留。");
     }
     updateRowButtons(row, record);
+  }
+
+  function handleWorkerDownloadRequest(event) {
+    const message = event.data || {};
+    if (message.type !== "LUXE_OPFS_DOWNLOAD_REQUEST" || !event.ports || !event.ports[0]) return false;
+    const port = event.ports[0];
+    const worker = new Worker(new URL("./recording-opfs-worker.js", location.href));
+    worker.postMessage({ type: "read", fileName: message.fileName, port }, [port]);
+    return true;
   }
 
   function bindRow(row) {
@@ -344,12 +389,12 @@
   });
   document.getElementById("detect").addEventListener("click", inspectEnvironment);
 
-  if ("BroadcastChannel" in window) {
-    const channel = new BroadcastChannel(CHANNEL_NAME);
-    channel.addEventListener("message", event => handleServiceWorkerMessage(event.data));
-  }
   if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.addEventListener("message", event => handleServiceWorkerMessage(event.data));
+    navigator.serviceWorker.addEventListener("message", event => {
+      if (!handleWorkerDownloadRequest(event)) {
+        handleServiceWorkerMessage(event.data);
+      }
+    });
   }
 
   inspectEnvironment();
