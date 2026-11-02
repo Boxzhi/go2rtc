@@ -157,6 +157,9 @@ func (s *Sender) Wait() {
 func (s *Sender) DropCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.buf == nil {
+		return 0
+	}
 	return s.Drops
 }
 
