@@ -1,6 +1,7 @@
 package recording
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -142,5 +143,114 @@ func TestPendingSessionExpires(t *testing.T) {
 
 	if s.State != stateExpired {
 		t.Fatalf("state = %q, want %q", s.State, stateExpired)
+	}
+}
+
+
+func TestStoppingOneSessionLeavesOtherSessionsActive(t *testing.T) {
+	m := newManager("http://127.0.0.1")
+	stream := &streams.Stream{}
+
+	one, err := m.create("camera-1", "one.mp4", "user-1", stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := m.create("camera-2", "two.mp4", "user-1", stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	three, err := m.create("camera-3", "three.mp4", "user-1", stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m.requestStop(one.ID, "user")
+	if one.State != stateStopped {
+		t.Fatalf("stopped session state = %q, want %q", one.State, stateStopped)
+	}
+	if two.State != statePending || three.State != statePending {
+		t.Fatalf("stopping one session changed other states: %q, %q", two.State, three.State)
+	}
+	if _, err = m.create("camera-4", "four.mp4", "user-1", stream); err != nil {
+		t.Fatalf("a freed slot should accept another session: %v", err)
+	}
+}
+
+func TestDownloadCookieIsPathScopedAndSingleUse(t *testing.T) {
+	m := newManager("http://127.0.0.1")
+	s, err := m.create("camera-1", "one.mp4", "user-1", &streams.Stream{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	startReq := httptest.NewRequest(http.MethodPost, "/api/luxe/recordings/start", nil)
+	startReq.Header.Set("X-Ingress-Path", "/api/hassio_ingress/test-token/")
+	startReq.Header.Set("Origin", "https://ha.example")
+	downloadURL := m.downloadURL(startReq, s.ID)
+
+	response := httptest.NewRecorder()
+	if err = m.setDownloadCookie(response, startReq, s, downloadURL); err != nil {
+		t.Fatal(err)
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("got %d cookies, want 1", len(cookies))
+	}
+	cookie := cookies[0]
+	if cookie.Path != downloadURL {
+		t.Fatalf("cookie path = %q, want %q", cookie.Path, downloadURL)
+	}
+	if !cookie.HttpOnly || !cookie.Secure || cookie.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("download cookie security attributes are incomplete: %+v", cookie)
+	}
+
+	streamReq := httptest.NewRequest(http.MethodGet, downloadURL, nil)
+	streamReq.AddCookie(cookie)
+	ctx, cancel := context.WithCancel(streamReq.Context())
+	defer cancel()
+
+	claimed, status, err := m.claimDownload(streamReq, s.ID, cancel)
+	if err != nil || status != 0 || claimed != s {
+		t.Fatalf("first stream claim failed: session=%v status=%d err=%v", claimed, status, err)
+	}
+
+	secondCtx, secondCancel := context.WithCancel(streamReq.Context())
+	defer secondCancel()
+	if _, status, err = m.claimDownload(streamReq, s.ID, secondCancel); err == nil || status != http.StatusConflict {
+		t.Fatalf("second stream claim should be rejected, status=%d err=%v", status, err)
+	}
+}
+
+func TestInvalidDownloadCookieIsRejected(t *testing.T) {
+	m := newManager("http://127.0.0.1")
+	s, err := m.create("camera-1", "one.mp4", "user-1", &streams.Stream{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/luxe/recordings/"+s.ID+"/stream", nil)
+	req.AddCookie(&http.Cookie{Name: downloadCookieName(s.ID), Value: "not-the-token"})
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+
+	if _, status, err := m.claimDownload(req, s.ID, cancel); err == nil || status != http.StatusUnauthorized {
+		t.Fatalf("invalid cookie should be rejected, status=%d err=%v", status, err)
+	}
+}
+
+func TestClientDisconnectMarksSessionInterrupted(t *testing.T) {
+	m := newManager("http://127.0.0.1")
+	s, err := m.create("camera-1", "one.mp4", "user-1", &streams.Stream{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.State = stateRecording
+
+	m.finish(s, nil, context.Canceled)
+	if s.State != stateInterrupted {
+		t.Fatalf("state = %q, want %q", s.State, stateInterrupted)
+	}
+	if s.StopReason != "client_disconnect" {
+		t.Fatalf("stop reason = %q, want client_disconnect", s.StopReason)
 	}
 }

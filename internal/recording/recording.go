@@ -34,13 +34,14 @@ const (
 )
 
 const (
-	statePending   = "pending"
-	stateStarting  = "starting"
-	stateRecording = "recording"
-	stateStopping  = "stopping"
-	stateStopped   = "stopped"
-	stateFailed    = "failed"
-	stateExpired   = "expired"
+	statePending     = "pending"
+	stateStarting    = "starting"
+	stateRecording   = "recording"
+	stateStopping    = "stopping"
+	stateStopped     = "stopped"
+	stateFailed      = "failed"
+	stateInterrupted = "interrupted"
+	stateExpired     = "expired"
 )
 
 var (
@@ -64,8 +65,12 @@ type session struct {
 	CreatedAt  time.Time
 	StartedAt  time.Time
 	FinishedAt time.Time
-	Stream     *streams.Stream
-	Cancel     context.CancelFunc
+	Stream           *streams.Stream
+	Cancel           context.CancelFunc
+	DownloadTokenHash [32]byte
+	CookiePath        string
+	CookieSecure      bool
+	StreamClaimed     bool
 }
 
 type sessionView struct {
@@ -133,6 +138,15 @@ func newManager(authURL string) *manager {
 func (m *manager) handle(w http.ResponseWriter, r *http.Request) {
 	route := recordingRoute(r.URL.Path)
 
+	// The media response is a native browser download. Its short-lived,
+	// path-scoped HttpOnly cookie is issued by the authenticated start request,
+	// so the browser can navigate to this URL without exposing a HA token in
+	// the URL or buffering the MP4 through JavaScript.
+	if strings.HasSuffix(route, "/stream") && r.Method == http.MethodGet {
+		m.stream(w, r, strings.TrimSuffix(route, "/stream"))
+		return
+	}
+
 	user, status, err := m.authenticate(r)
 	if err != nil {
 		writeError(w, status, err.Error())
@@ -144,8 +158,6 @@ func (m *manager) handle(w http.ResponseWriter, r *http.Request) {
 		m.list(w, user)
 	case route == "start" && r.Method == http.MethodPost:
 		m.start(w, r, user)
-	case strings.HasSuffix(route, "/stream") && r.Method == http.MethodGet:
-		m.stream(w, r, user, strings.TrimSuffix(route, "/stream"))
 	case strings.HasSuffix(route, "/stop") && r.Method == http.MethodPost:
 		m.stop(w, user, strings.TrimSuffix(route, "/stop"))
 	case !strings.Contains(route, "/") && route != "" && r.Method == http.MethodGet:
@@ -236,6 +248,12 @@ func (m *manager) start(w http.ResponseWriter, r *http.Request, user *haUser) {
 	}
 
 	downloadURL := m.downloadURL(r, s.ID)
+	if err = m.setDownloadCookie(w, r, s, downloadURL); err != nil {
+		m.discard(s.ID)
+		writeError(w, http.StatusInternalServerError, "could not issue a secure download session")
+		return
+	}
+
 	api.ResponseJSON(w, map[string]any{
 		"ok":                   true,
 		"session_id":           s.ID,
@@ -279,26 +297,21 @@ func (m *manager) create(source, filename, userID string, stream *streams.Stream
 	return s, nil
 }
 
-func (m *manager) stream(w http.ResponseWriter, r *http.Request, user *haUser, id string) {
-	s, err := m.getOwned(id, user.ID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
-		return
-	}
-
+func (m *manager) stream(w http.ResponseWriter, r *http.Request, id string) {
 	ctx, cancel := context.WithCancel(r.Context())
-	m.mu.Lock()
-	if s.State != statePending {
-		m.mu.Unlock()
+	s, status, err := m.claimDownload(r, id, cancel)
+	if err != nil {
 		cancel()
-		writeError(w, http.StatusConflict, errNotPending.Error())
+		writeError(w, status, err.Error())
 		return
 	}
-	s.State = stateStarting
-	s.StartedAt = m.now()
-	s.Cancel = cancel
+	m.clearDownloadCookie(w, s)
+
 	stream := s.Stream
-	m.mu.Unlock()
+	timer := time.AfterFunc(maxDuration, func() {
+		m.requestStop(s.ID, "time_limit")
+	})
+	defer timer.Stop()
 
 	medias := mp4.ParseQuery(url.Values{"mp4": []string{"all"}})
 	consumer := mp4.NewConsumer(medias)
@@ -308,8 +321,9 @@ func (m *manager) stream(w http.ResponseWriter, r *http.Request, user *haUser, i
 	consumer.WithRequest(r)
 
 	if err = stream.AddConsumer(consumer); err != nil {
+		ctxErr := ctx.Err()
+		m.finish(s, err, ctxErr)
 		cancel()
-		m.finish(s, err, nil)
 		log.Warn().Err(err).Str("source", s.Source).Msg("recording stream could not start")
 		writeError(w, http.StatusBadGateway, "go2rtc could not attach to the camera stream: "+err.Error())
 		return
@@ -318,6 +332,7 @@ func (m *manager) stream(w http.ResponseWriter, r *http.Request, user *haUser, i
 	if ctx.Err() != nil {
 		stream.RemoveConsumer(consumer)
 		m.finish(s, nil, ctx.Err())
+		cancel()
 		return
 	}
 
@@ -326,11 +341,6 @@ func (m *manager) stream(w http.ResponseWriter, r *http.Request, user *haUser, i
 		s.State = stateRecording
 	}
 	m.mu.Unlock()
-
-	timer := time.AfterFunc(maxDuration, func() {
-		m.requestStop(s.ID, "time_limit")
-	})
-	defer timer.Stop()
 
 	cleanupDone := make(chan struct{})
 	go func() {
@@ -453,16 +463,21 @@ func (m *manager) finish(s *session, writeErr, ctxErr error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if writeErr != nil && ctxErr == nil {
+	switch {
+	case ctxErr != nil && s.StopReason == "":
+		s.State = stateInterrupted
+		s.StopReason = "client_disconnect"
+	case writeErr != nil && ctxErr == nil:
 		s.State = stateFailed
 		s.Error = writeErr.Error()
-	} else {
+	default:
 		s.State = stateStopped
 	}
 	if s.FinishedAt.IsZero() {
 		s.FinishedAt = m.now()
 	}
 	s.Cancel = nil
+	s.DownloadTokenHash = [32]byte{}
 }
 
 func (m *manager) pruneLocked(now time.Time) {

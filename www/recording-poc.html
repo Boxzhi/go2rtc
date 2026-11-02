@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <title>Luxe Recording Download POC</title>
+  <style>
+    :root { color-scheme: dark; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#111827; color:#e5e7eb; }
+    body { margin:0; padding:24px; max-width:960px; margin-inline:auto; }
+    h1 { font-size:22px; margin:0 0 8px; }
+    p { color:#9ca3af; line-height:1.6; }
+    .notice { border:1px solid #374151; border-radius:12px; padding:14px; margin:18px 0; background:#1f2937; }
+    .camera { border:1px solid #374151; border-radius:14px; padding:16px; margin:12px 0; background:#1f2937; }
+    .camera h2 { font-size:16px; margin:0 0 12px; }
+    .fields { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    label { display:block; font-size:12px; color:#9ca3af; }
+    input { box-sizing:border-box; width:100%; margin-top:6px; padding:10px; border:1px solid #4b5563; border-radius:8px; background:#111827; color:#f9fafb; }
+    .actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+    button { border:0; border-radius:8px; padding:10px 14px; background:#2563eb; color:white; font-weight:600; cursor:pointer; }
+    button.secondary { background:#374151; }
+    button.danger { background:#991b1b; }
+    button:disabled { opacity:.4; cursor:not-allowed; }
+    .status { margin-top:10px; font-size:13px; color:#93c5fd; min-height:20px; overflow-wrap:anywhere; }
+    .small { font-size:12px; color:#9ca3af; }
+    @media(max-width:600px) { body { padding:16px; } .fields { grid-template-columns:1fr; } }
+  </style>
+  <script src="recording-poc.js" defer></script>
+</head>
+<body>
+  <h1>Luxe 原生录像下载 POC</h1>
+  <p>独立验证 go2rtc 原生 MP4 Consumer 与浏览器原生附件下载。此页面不修改正式监控卡片。</p>
+  <div class="notice">
+    <strong>测试规则</strong>
+    <p>每路独立创建、下载和停止；最多三路同时录像、三路同时下载。MP4 通过浏览器原生下载接收，不使用 Blob、OPFS、JS 文件缓存或串行队列。每路点击「创建任务」后，再点击「开始下载」启动实际录像。</p>
+    <div id="auth-status" class="status">正在检测 Home Assistant 登录状态…</div>
+  </div>
+
+  <section class="camera" data-camera="0">
+    <h2>客厅移动 3K</h2>
+    <div class="fields">
+      <label>go2rtc Stream 名称<input class="source" value="jinghuafu_keting_ptz_3k"></label>
+      <label>下载文件名<input class="filename" value="luxe-keting-ptz.mp4"></label>
+    </div>
+    <div class="actions">
+      <button data-action="create">创建任务</button>
+      <button class="secondary" data-action="download" disabled>开始下载</button>
+      <button class="danger" data-action="stop" disabled>停止录像</button>
+    </div>
+    <div class="status" aria-live="polite">尚未创建任务</div>
+  </section>
+
+  <section class="camera" data-camera="1">
+    <h2>客厅固定 3K</h2>
+    <div class="fields">
+      <label>go2rtc Stream 名称<input class="source" value="jinghuafu_keting_fixed_3k"></label>
+      <label>下载文件名<input class="filename" value="luxe-keting-fixed.mp4"></label>
+    </div>
+    <div class="actions">
+      <button data-action="create">创建任务</button>
+      <button class="secondary" data-action="download" disabled>开始下载</button>
+      <button class="danger" data-action="stop" disabled>停止录像</button>
+    </div>
+    <div class="status" aria-live="polite">尚未创建任务</div>
+  </section>
+
+  <section class="camera" data-camera="2">
+    <h2>餐厅 2K</h2>
+    <div class="fields">
+      <label>go2rtc Stream 名称<input class="source" value="jinghuafu_canting_2k"></label>
+      <label>下载文件名<input class="filename" value="luxe-canting.mp4"></label>
+    </div>
+    <div class="actions">
+      <button data-action="create">创建任务</button>
+      <button class="secondary" data-action="download" disabled>开始下载</button>
+      <button class="danger" data-action="stop" disabled>停止录像</button>
+    </div>
+    <div class="status" aria-live="polite">尚未创建任务</div>
+  </section>
+
+  <p class="small">提示：如果浏览器拦截附件下载，请确认当前页面是通过 Home Assistant Add-on Ingress 打开的，并允许该站点下载多个文件。此 POC 不会写入服务器文件。</p>
+</body>
+</html>
