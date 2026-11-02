@@ -8,12 +8,12 @@ The Home Assistant installation uses one **Luxe go2rtc Add-on**. No GPAC sidecar
 
 The Go recording manager owns the **session lifecycle only**. It does not store video files on the add-on filesystem, write to Home Assistant `/media`, or retain a complete recording in server memory.
 
-1. The frontend creates a recording session with `POST /api/luxe/recordings/start`, authenticated by the current Home Assistant user's Bearer token.
-2. The Go manager validates that token against Core's `/api/auth/current` endpoint, validates the configured go2rtc stream name, and allocates a random session ID.
+1. The frontend creates a recording session with `POST /api/luxe/recordings/start`, authenticated through the user's Home Assistant Ingress session.
+2. The Go manager accepts the Supervisor-provided identity only when the TCP peer is 172.30.32.2 with a valid X-Ingress-Path, and validates direct clients' Bearer tokens against Core's `/api/auth/current` endpoint, validates the configured go2rtc stream name, and allocates a random session ID.
 3. The response sets a short-lived, HttpOnly, SameSite=Strict cookie scoped to that session's exact download URL. The cookie is not exposed to JavaScript or placed in the URL.
 4. The browser performs a normal same-origin navigation to the returned `download_url`. The Go manager attaches a native go2rtc MP4 Consumer and sends a streaming HTTP response with `Content-Disposition: attachment`.
 5. The browser's native download manager receives MP4 bytes directly. JavaScript does not fetch or buffer the media body and does not use Blob, OPFS, or a server-side file.
-6. `POST /api/luxe/recordings/{session_id}/stop` cancels only that session's MP4 consumer. A disconnected browser request also releases the consumer.
+6. `POST /api/luxe/recordings/{session_id}/stop` gives the consumer a bounded drain period before closing that session's MP4 response. A disconnected browser request also releases the consumer.
 7. Session metadata remains in memory briefly for status polling and is discarded. It is not a recording history.
 
 ## Fixed limits
@@ -29,7 +29,7 @@ The Go recording manager owns the **session lifecycle only**. It does not store 
 
 ## API
 
-All control endpoints require `Authorization: Bearer <Home Assistant access token>`. The token is validated against Home Assistant Core. The browser must access the API through the Add-on's authenticated Ingress URL.
+Ingress control requests use the Supervisor-authenticated `X-Remote-User-Id` and require no frontend access token. The go2rtc server trusts that header only from TCP peer `172.30.32.2` with a valid `X-Ingress-Path`. Direct/non-Ingress control requests still require a HA Bearer token verified against Home Assistant Core.
 
 - `GET /api/luxe/recordings` — list the current user's recent in-memory sessions.
 - `POST /api/luxe/recordings/start` — JSON body: `{"source":"configured_stream_name","filename":"recording.mp4"}`; returns a session ID and download URL, and sets the scoped download cookie.
@@ -53,7 +53,7 @@ The POC intentionally uses normal browser navigation for the MP4 response. It do
 
 ## Home Assistant connectivity
 
-The default token-validation URL is `http://homeassistant:8123/api/auth/current`. It can be changed in go2rtc configuration:
+The token-validation URL used for direct/non-Ingress requests is `http://homeassistant:8123/api/auth/current`. It can be changed in go2rtc configuration:
 
 ```yaml
 luxe_recording:
@@ -61,12 +61,12 @@ luxe_recording:
   auth_url: http://homeassistant:8123/api/auth/current
 ```
 
-Authentication fails closed if Home Assistant cannot validate the token. The Add-on already enables `homeassistant_api: true`; the implementation uses the user's own token for identity validation rather than granting recording callers Supervisor-level access.
+Authentication fails closed if Home Assistant cannot validate a direct caller's token or an Ingress session has no user ID. The Add-on already enables `homeassistant_api: true`; the implementation uses the user's own token for identity validation rather than granting recording callers Supervisor-level access.
 
 ## Acceptance checks before any release
 
 1. CI tests and `go build ./...` pass.
-2. HAOS Ingress forwards `X-Ingress-Path` and the user's Authorization header correctly.
+2. HAOS Ingress forwards `X-Ingress-Path` and `X-Remote-User-Id`; direct requests cannot spoof an authenticated Ingress identity.
 3. The scoped HttpOnly cookie is accepted by the browser and sent to the exact download URL.
 4. A native browser download starts without JavaScript fetching or buffering MP4 bytes.
 5. Three different cameras can record and download simultaneously; a fourth is rejected.
@@ -79,3 +79,16 @@ Authentication fails closed if Home Assistant cannot validate the token. The Add
 12. No GPAC service, custom component, server-side recording file, Blob/OPFS buffer or `/media` write access is needed.
 
 **This branch is development only. Do not deploy or publish a production release until CI and HAOS real-device tests pass.**
+
+
+## Reliability updates (2026-11-02)
+
+- The separate Recording Manager implementation remains confined to the development branch; the normal `api/stream.mp4` endpoint is unchanged.
+- The REC state begins **only after the first actual MP4 media fragment** reaches the HTTP response, not merely when a consumer is attached or the init segment is written.
+- User stop and the 30-minute time limit attempt a bounded (five-second) drain of already queued MP4 sender packets before the download response finishes.
+- A session that ends without media, or cannot drain its queued fragments, is marked as failed.
+- A client disconnect immediately releases the MP4 consumer rather than attempting a graceful download to an absent client.
+- The POC uses trusted Ingress identity and does not read HA access tokens from a parent frame.
+- No complete recording is stored on NAS, HA /media, or inside go2rtc.
+
+**CI success is not device verification.** Native downloads on iPhone Safari, Home Assistant iOS App, Mac Safari, and actual HLC7 MP4 playback must still be tested through the Add-on's Ingress before any release.
