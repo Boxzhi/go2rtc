@@ -154,12 +154,11 @@ func (s *Sender) Wait() {
 	}
 }
 
+// DropCount remains readable after Close: a recording must not lose evidence
+// of a queued packet drop just because the sender was drained and detached.
 func (s *Sender) DropCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.buf == nil {
-		return 0
-	}
 	return s.Drops
 }
 
