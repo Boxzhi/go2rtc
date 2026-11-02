@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AlexxIT/go2rtc/internal/api"
 	"github.com/google/uuid"
 )
 
@@ -162,11 +163,11 @@ func (m *manager) createOPFSRelay(w http.ResponseWriter, r *http.Request, user *
 		return
 	}
 
-	apiURL := m.opfsRelayURL(r, s.ID, "chunk")
+	apiURL := m.opfsRelayURL(r, s.id, "chunk")
 	api.ResponseJSON(w, map[string]any{
 		"ok": true,
-		"session_id": s.ID,
-		"filename": s.Filename,
+		"session_id": s.id,
+		"filename": s.filename,
 		"size_bytes": s.sizeBytes,
 		"crc32": fmt.Sprintf("%08x", s.expectedCRC),
 		"chunk_size": opfsRelayChunkSize,
