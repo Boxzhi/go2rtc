@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 )
 
 const downloadCookiePrefix = "luxe_recording_"
@@ -121,4 +120,3 @@ func (m *manager) discard(id string) {
 	m.mu.Unlock()
 }
 
-var _ = time.Second
