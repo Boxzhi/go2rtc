@@ -269,11 +269,11 @@ func (m *manager) uploadOPFSRelayChunk(w http.ResponseWriter, r *http.Request, s
 		writeError(w, http.StatusBadRequest, "a valid chunk offset is required")
 		return
 	}
-	if r.ContentLength <= 0 || r.ContentLength > opfsRelayChunkSize {
-		writeError(w, http.StatusLengthRequired, "chunk Content-Length must be between 1 and 256 KiB")
+	if r.ContentLength > opfsRelayChunkSize {
+		writeError(w, http.StatusRequestEntityTooLarge, "chunk body exceeds 256 KiB")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, opfsRelayChunkSize)
+	r.Body = http.MaxBytesReader(w, r.Body, opfsRelayChunkSize+1)
 	defer r.Body.Close()
 
 	s.uploadMu.Lock()
@@ -302,7 +302,7 @@ func (m *manager) uploadOPFSRelayChunk(w http.ResponseWriter, r *http.Request, s
 	if remaining < chunkBytes {
 		chunkBytes = remaining
 	}
-	if r.ContentLength != chunkBytes {
+	if r.ContentLength > 0 && r.ContentLength != chunkBytes {
 		s.mu.Unlock()
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("chunk size must be %d bytes", chunkBytes))
 		return
@@ -310,6 +310,19 @@ func (m *manager) uploadOPFSRelayChunk(w http.ResponseWriter, r *http.Request, s
 	s.mu.Unlock()
 
 	written, err := io.CopyN(io.MultiWriter(s.writer, s.hash), r.Body, chunkBytes)
+	if err == nil && written == chunkBytes {
+		var extra [1]byte
+		var extraErr error
+		var extraBytes int
+		extraBytes, extraErr = r.Body.Read(extra[:])
+		if extraBytes > 0 || (extraErr != nil && extraErr != io.EOF) {
+			if extraBytes > 0 {
+				err = errors.New("chunk body exceeds the expected byte count")
+			} else {
+				err = extraErr
+			}
+		}
+	}
 	if err != nil || written != chunkBytes {
 		if err == nil {
 			err = io.ErrShortWrite
