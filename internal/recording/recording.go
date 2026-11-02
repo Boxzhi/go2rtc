@@ -94,6 +94,7 @@ type sessionView struct {
 type manager struct {
 	mu       sync.Mutex
 	sessions map[string]*session
+	opfsRelays map[string]*opfsRelaySession
 	authURL  string
 	client   *http.Client
 	now      func() time.Time
@@ -125,12 +126,15 @@ func Init() {
 	api.HandleFunc("api/luxe/recordings", m.handle)
 	api.HandleFunc("api/luxe/recordings/", m.handle)
 	api.HandleFunc("api/luxe/recording-poc/download", m.nativeDownloadPOC)
+	api.HandleFunc("api/luxe/recording-poc/relay", m.handleOPFSRelay)
+	api.HandleFunc("api/luxe/recording-poc/relay/", m.handleOPFSRelay)
 	log.Info().Msg("Luxe recording-session API enabled")
 }
 
 func newManager(authURL string) *manager {
 	return &manager{
 		sessions: make(map[string]*session),
+		opfsRelays: make(map[string]*opfsRelaySession),
 		authURL:  authURL,
 		client: &http.Client{
 			Timeout: authTimeout,
