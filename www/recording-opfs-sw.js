@@ -11,13 +11,20 @@ self.addEventListener("activate", event => {
 });
 
 async function findSourceClient(event) {
-  const sourceId = event.clientId || event.resultingClientId;
-  if (sourceId) {
-    const source = await self.clients.get(sourceId);
+  // For a navigation download opened in a new tab, clientId can be empty and
+  // resultingClientId belongs to the download tab. Prefer the initiating page.
+  if (event.clientId) {
+    const source = await self.clients.get(event.clientId);
     if (source) return source;
   }
+
   const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-  return clients.find(client => client.url.startsWith(self.registration.scope)) || null;
+  const candidates = clients.filter(client =>
+    client.id !== event.resultingClientId &&
+    client.url.startsWith(self.registration.scope)
+  );
+  return candidates.find(client => client.url.includes("recording-opfs-poc.html")) ||
+    candidates[0] || null;
 }
 
 function notify(client, type, fileName, detail) {
