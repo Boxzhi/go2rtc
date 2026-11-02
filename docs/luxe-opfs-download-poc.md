@@ -7,7 +7,7 @@ This is a client-side proof of concept only. It does not call the Recording Mana
 Verify the browser-side building blocks required by the next Recording Manager design:
 
 1. Three independent Dedicated Workers can write separate files to the current device's Origin Private File System (OPFS).
-2. A Service Worker can return an OPFS file as a chunked HTTP attachment response.
+2. A Service Worker can return an OPFS file as a chunked HTTP attachment response, while a Dedicated Worker performs the actual OPFS reads.
 3. The browser can receive the response as a native download without constructing a Blob, creating an object URL, or loading the complete file into JavaScript memory.
 4. The page can recover temporary OPFS files after reload and let the user retry the download or delete them.
 
@@ -16,7 +16,9 @@ Verify the browser-side building blocks required by the next Recording Manager d
 - www/recording-opfs-poc.html: isolated test UI.
 - www/recording-opfs-poc.js: capability detection, Worker orchestration, download trigger and cleanup.
 - www/recording-opfs-worker.js: writes deterministic test data using FileSystemSyncAccessHandle in a Dedicated Worker.
-- www/recording-opfs-sw.js: serves the disk-backed OPFS file stream with Content-Disposition: attachment.
+- www/recording-opfs-sw.js: exposes a streaming attachment response and coordinates the read worker through MessageChannel.
+
+The Service Worker does not call getFile() or read OPFS itself. It sends a MessagePort to the initiating page; that page starts a Dedicated Worker, which reads OPFS through FileSystemSyncAccessHandle and transfers one bounded chunk at a time.
 
 The existing recording-poc.html links to this page. The add-on's Ingress entry remains unchanged.
 
@@ -36,7 +38,7 @@ The existing recording-poc.html links to this page. The add-on's Ingress entry r
 ## Important semantics
 
 - The test data is synthetic .bin content, not a playable MP4. This POC validates local storage and browser download transport only; actual camera MP4 compatibility is a later integration test.
-- FileSystemFileHandle.getFile().stream() exposes a disk-backed file as a ReadableStream. The code does not construct a Blob or buffer the complete file in memory.
+- OPFS reads use FileSystemSyncAccessHandle inside a Dedicated Worker. Chunks cross to the Service Worker through a transferred MessagePort; neither File nor Blob objects are created, and the complete file is never buffered in JavaScript memory.
 - A Service Worker stream reaching EOF means the browser consumed the response body. It is not a guaranteed operating-system file-saved callback. For that reason this POC deliberately requires manual cleanup after the user verifies the download.
 - OPFS consumes storage on the current browser/device. It does not write video data to the NAS, Home Assistant, or go2rtc server.
 - Browser storage quotas, eviction, service-worker behavior and downloads inside Home Assistant's iOS WKWebView must be tested on real devices. Desktop CI cannot prove these behaviors.
