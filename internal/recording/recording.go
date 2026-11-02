@@ -430,6 +430,12 @@ func (m *manager) stream(w http.ResponseWriter, r *http.Request, id string) {
 	<-cleanupDone
 	<-dropMonitorDone
 
+	// The periodic monitor may miss drops that happened just before Stop.
+	// Check the preserved sender counters again after the final drain.
+	if dropped := consumer.DropCount(); dropped > 0 && r.Context().Err() == nil {
+		m.noteStreamFailure(s, "transport_drops", fmt.Sprintf("recording lost %d MP4 transport packets", dropped))
+	}
+
 	// MP4 initialization alone is not a playable camera recording. Report
 	// a failed session if normal stop/timeout occurred before any media.
 	if !writer.mediaWritten && r.Context().Err() == nil {
