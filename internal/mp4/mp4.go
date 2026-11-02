@@ -24,6 +24,10 @@ func Init() {
 
 	api.HandleFunc("api/frame.mp4", handlerKeyframe)
 	api.HandleFunc("api/stream.mp4", handlerMP4)
+	// Luxe streaming-download POC: routes isolated from normal playback.
+	api.HandleFunc("api/luxe/recording.mp4", luxeRecordStream)
+	api.HandleFunc("api/luxe/recordings/status", luxeRecordStatus)
+	api.HandleFunc("api/luxe/recordings/stop", luxeRecordStop)
 }
 
 var log zerolog.Logger
