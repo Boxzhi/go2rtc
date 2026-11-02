@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <title>Luxe OPFS → WKDownload 集成 POC</title>
+  <style>
+    :root { color-scheme:dark; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#111827; color:#e5e7eb; }
+    body { margin:0; padding:22px; max-width:960px; margin-inline:auto; }
+    h1 { margin:0 0 8px; font-size:23px; }
+    h2 { margin:0; font-size:16px; overflow-wrap:anywhere; }
+    p { color:#9ca3af; line-height:1.6; }
+    .panel,.file { border:1px solid #374151; border-radius:13px; background:#1f2937; padding:16px; margin:12px 0; }
+    .status { color:#93c5fd; font-size:13px; line-height:1.6; overflow-wrap:anywhere; }
+    .muted { color:#9ca3af; font-size:12px; overflow-wrap:anywhere; }
+    .actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+    button { border:0; border-radius:8px; padding:11px 14px; font-weight:650; background:#2563eb; color:#fff; cursor:pointer; }
+    button.secondary { background:#374151; }
+    button.danger { background:#991b1b; }
+    button:disabled { opacity:.4; cursor:not-allowed; }
+    a { color:#93c5fd; }
+    .note { border-left:3px solid #3b82f6; padding-left:12px; }
+    @media(max-width:600px) { body { padding:15px; } }
+  </style>
+  <script src="recording-opfs-wkdownload-poc.js" defer></script>
+</head>
+<body>
+  <h1>Luxe OPFS → WKDownload 集成 POC</h1>
+  <p>验证 OPFS 临时文件经 go2rtc 有界内存管道，交给 Home Assistant iOS App 原生 WKDownload 下载。此页面不连接摄像机，不调用正式 Recording Manager。</p>
+
+  <section class="panel">
+    <strong>当前测试架构</strong>
+    <p>Dedicated Worker 从 OPFS 每次读取 256 KiB，通过独立 HTTP 分块请求写入 go2rtc 的 io.Pipe；WKDownload 通过另一条 HTTP 附件响应读取同一条管道。上传端受到下载端背压控制。</p>
+    <p class="note">go2rtc 不创建录像文件，不写 NAS、HA /media 或自身磁盘；不缓存完整录像到服务器内存。服务器只使用无持久化的管道和小块传输缓冲。</p>
+    <p>Service Worker 不参与本方案，因此适用于此前检测到 Service Worker 不可用的 HA iOS App WKWebView。</p>
+    <p id="global-status" class="status">正在扫描 OPFS 文件…</p>
+    <div class="actions">
+      <button id="refresh-files" class="secondary">重新扫描 OPFS</button>
+      <a href="recording-opfs-poc.html">返回 OPFS 流式下载 POC</a>
+    </div>
+  </section>
+
+  <div id="file-list"></div>
+
+  <section class="panel">
+    <strong>测试顺序</strong>
+    <p>1. 先在原 OPFS POC 中完成 A、B、C 写入，再返回本页面扫描。</p>
+    <p>2. 点击某一路「创建中转任务」。此步骤只创建短期内存任务，不启动下载。</p>
+    <p>3. 点击「开始原生下载」。页面先触发附件导航，再由 Dedicated Worker 从 OPFS 分块上传。</p>
+    <p>4. 等待页面显示 go2rtc 已完整输出下载流，同时检查 iOS 下载管理器是否显示下载完成。</p>
+    <p>5. 确认下载完成后，点击「清理 OPFS」。下载管理器中的已下载文件不会受影响。</p>
+    <p>6. 先测试 A 单路，再测试 B、C 两路并发，最后测试 A、B、C 三路并发。</p>
+    <p class="note">服务器端 CRC32 校验验证 OPFS → go2rtc 的数据完整性；下载管理器显示完成和文件大小验证 WKDownload 交付。两项必须分别通过。</p>
+  </section>
+</body>
+</html>
