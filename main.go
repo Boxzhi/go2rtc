@@ -3,6 +3,7 @@ package main
 import (
 	"slices"
 
+	"github.com/AlexxIT/go2rtc/internal/afterstop"
 	"github.com/AlexxIT/go2rtc/internal/alsa"
 	"github.com/AlexxIT/go2rtc/internal/api"
 	"github.com/AlexxIT/go2rtc/internal/api/ws"
@@ -71,6 +72,7 @@ func main() {
 		{"webrtc", webrtc.Init}, // webrtc source, WebRTC server
 		// Main API
 		{"mp4", mp4.Init},     // MP4 API
+		{"luxe_after_stop_poc", afterstop.Init}, // opt-in isolated recording POC
 		{"hls", hls.Init},     // HLS API
 		{"mjpeg", mjpeg.Init}, // MJPEG API
 		// Other sources and servers
