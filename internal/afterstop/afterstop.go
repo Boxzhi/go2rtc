@@ -1,4 +1,4 @@
-// Package afterstop implements an opt-in, single-camera recording/download POC.
+// Package afterstop implements an opt-in, three-stream record-first/download-later POC.
 // It is deliberately disabled by default and must never be enabled on a public
 // go2rtc endpoint. Completed MP4 data is kept temporarily on the test server.
 package afterstop
@@ -28,11 +28,12 @@ import (
 )
 
 const (
-	routePrefix = "/api/luxe/poc2/"
-	maxDuration = 30 * time.Second // POC.2 only; 30-minute support is not implemented.
+	routePrefix = "/api/luxe/poc3/"
+	maxDuration = 30 * time.Second // POC.3 short-run gate. 30 minutes requires further validation.
 	maxBytes = 256 << 20
-	retention = 15 * time.Minute
-	maxCompleted = 4
+	retention = 30 * time.Minute
+	maxCompleted = 6
+	maxActive = 3
 )
 
 type session struct {
@@ -60,7 +61,7 @@ type manager struct {
 	mu sync.Mutex
 	secret string
 	dir string
-	activeID string
+	activeIDs map[string]string
 	sessions map[string]*session
 }
 
@@ -108,10 +109,11 @@ func Init() {
 		secret: cfg.Mod.Secret,
 		dir: dir,
 		sessions: make(map[string]*session),
+		activeIDs: make(map[string]string),
 	}
-	api.HandleFunc("api/luxe/poc2/", m.handle)
+	api.HandleFunc("api/luxe/poc3/", m.handle)
 	go m.janitor()
-	log.Warn().Str("temp_dir", dir).Msg("POC.2 enabled: single camera, 30 seconds maximum, 256 MiB file limit")
+	log.Warn().Str("temp_dir", dir).Msg("POC.3 enabled: three simultaneous named streams, 30 seconds maximum each, 256 MiB each")
 }
 
 func newID() (string, error) {
@@ -182,7 +184,7 @@ func (s *session) view() sessionView {
 		v.FinishedAt = &finished
 	}
 	if s.state == "ready" {
-		v.DownloadURL = "api/luxe/poc2/download/" + url.PathEscape(s.id) + "?token=" + url.QueryEscape(s.token)
+		v.DownloadURL = "api/luxe/poc3/download/" + url.PathEscape(s.id) + "?token=" + url.QueryEscape(s.token)
 	}
 	return v
 }
@@ -224,7 +226,7 @@ func (m *manager) start(w http.ResponseWriter, r *http.Request) {
 		request.DurationSeconds = 10
 	}
 	if request.DurationSeconds < 3 || request.DurationSeconds > 30 {
-		reject(w, http.StatusBadRequest, "POC.2 duration must be 3–30 seconds")
+		reject(w, http.StatusBadRequest, "POC.3 duration must be 3–30 seconds")
 		return
 	}
 	if request.Source == "" || len(request.Source) > 128 || strings.ContainsAny(request.Source, " \t\r\n") {
@@ -244,8 +246,12 @@ func (m *manager) start(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pruneLocked(time.Now())
-	if m.activeID != "" {
-		reject(w, http.StatusConflict, "POC.2 supports only one active recording")
+	if len(m.activeIDs) >= maxActive {
+		reject(w, http.StatusConflict, "maximum three simultaneous recordings")
+		return
+	}
+	if _, active := m.activeIDs[request.Source]; active {
+		reject(w, http.StatusConflict, "stream already being recorded")
 		return
 	}
 	count := 0
@@ -293,13 +299,13 @@ func (m *manager) start(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 	s := &session{
-		id:id, token:token, source:request.Source, filename:fmt.Sprintf("luxe-poc2-%s-%s.mp4",now.Format("20060102-150405"),id[:8]),
+		id:id, token:token, source:request.Source, filename:fmt.Sprintf("luxe-poc3-%s-%s.mp4",now.Format("20060102-150405"),id[:8]),
 		path:path, state:"recording", started:now,
 		duration:time.Duration(request.DurationSeconds)*time.Second,
 		audioCodec:audioCodec, videoCodec:videoCodec, stop:make(chan struct{}),
 		stream:stream, consumer:consumer,
 	}
-	m.activeID = id
+	m.activeIDs[request.Source] = id
 	m.sessions[id] = s
 	go m.record(s, file)
 	respond(w, http.StatusAccepted, s.view())
@@ -365,8 +371,8 @@ func (m *manager) record(s *session, file *os.File) {
 	} else {
 		s.state = "ready"
 	}
-	if m.activeID == s.id {
-		m.activeID = ""
+	if m.activeIDs[s.source] == s.id {
+		delete(m.activeIDs, s.source)
 	}
 }
 
@@ -425,4 +431,4 @@ func (m *manager) download(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 // Do not use as a production recording subsystem.
-// This POC is deliberately short-lived, single-stream and test-only.
+// This POC is deliberately short-lived, up to three streams and test-only.
