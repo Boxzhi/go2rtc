@@ -31,7 +31,7 @@ jobs:
           go-version: '1.27'
           cache: true
       - name: Test relevant packages
-        run: go test -count=1 ./pkg/h265 ./pkg/iso ./pkg/mp4 ./pkg/xiaomi/miss/... ./internal/mp4
+        run: go test -count=1 ./pkg/h265 ./pkg/iso ./pkg/mp4 ./pkg/xiaomi/miss/... ./internal/mp4 ./internal/afterstop
       - name: Build every package
         run: go build ./...
       - name: Build isolated Linux amd64 test executable
