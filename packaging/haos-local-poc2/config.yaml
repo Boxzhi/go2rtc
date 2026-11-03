@@ -1,6 +1,6 @@
 name: "Luxe After-Stop Recording POC.2"
 slug: "luxe_after_stop_poc2"
-version: "0.2.0"
+version: "0.2.1"
 description: "Isolated single-camera recording and native download test; NOT the official go2rtc addon"
 stage: experimental
 url: "https://github.com/Boxzhi/go2rtc/tree/feat/luxe-record-after-stop"
@@ -11,7 +11,7 @@ boot: manual
 init: false
 ingress: true
 ingress_port: 1984
-ingress_entry: "/luxe-record-after-stop-poc2.html"
+ingress_entry: "luxe-record-after-stop-poc2.html"
 panel_title: "Luxe 录像下载测试"
 panel_icon: "mdi:video"
 panel_admin: true
