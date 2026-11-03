@@ -43,6 +43,35 @@ jobs:
           mkdir -p dist
           go build -trimpath -ldflags="-s -w" -o dist/go2rtc-record-after-stop-poc-linux-amd64 .
           sha256sum dist/go2rtc-record-after-stop-poc-linux-amd64 > dist/SHA256SUMS.txt
+      - name: Smoke test embedded POC2 page over local HTTP
+        run: |
+          set -eu
+          grep -Fx 'ingress_entry: "luxe-record-after-stop-poc2.html"' packaging/haos-local-poc2/config.yaml
+          cat >/tmp/luxe-poc2-smoke.yaml <<'EOF'
+          app:
+            modules:
+              - api
+          api:
+            listen: "127.0.0.1:1984"
+          EOF
+          ./dist/go2rtc-record-after-stop-poc-linux-amd64 -c /tmp/luxe-poc2-smoke.yaml >/tmp/luxe-poc2-smoke.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+          ok=0
+          for attempt in $(seq 1 30); do
+            if curl --silent --show-error --fail http://127.0.0.1:1984/luxe-record-after-stop-poc2.html -o /tmp/luxe-poc2-smoke-page; then
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ok" -ne 1 ]; then
+            cat /tmp/luxe-poc2-smoke.log
+            exit 1
+          fi
+          grep -Fq 'Luxe POC.2' /tmp/luxe-poc2-smoke-page
+          curl --silent --show-error --fail http://127.0.0.1:1984/api -o /tmp/luxe-poc2-smoke-api
+          grep -Fq 'version' /tmp/luxe-poc2-smoke-api
       - name: Build isolated Home Assistant local POC test app package
         run: |
           bash -n packaging/haos-local-poc2/run.sh
