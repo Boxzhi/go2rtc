@@ -1,0 +1,51 @@
+name: Luxe Record After Stop - Isolated POC
+
+on:
+  push:
+    branches:
+      - feat/luxe-record-after-stop
+  pull_request:
+    branches:
+      - luxe/hlc7
+    paths:
+      - 'internal/**'
+      - 'pkg/**'
+      - 'main.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/luxe-record-after-stop-poc.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out selected branch
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+      - name: Test relevant packages
+        run: go test -count=1 ./pkg/h265 ./pkg/iso ./pkg/mp4 ./pkg/xiaomi/miss/... ./internal/mp4
+      - name: Build every package
+        run: go build ./...
+      - name: Build isolated Linux amd64 test executable
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w" -o dist/go2rtc-record-after-stop-poc-linux-amd64 .
+          sha256sum dist/go2rtc-record-after-stop-poc-linux-amd64 > dist/SHA256SUMS.txt
+      - name: Upload POC artifacts (not a release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: luxe-record-after-stop-poc-${{ github.run_number }}-${{ github.run_attempt }}
+          path: dist/*
+          retention-days: 7
