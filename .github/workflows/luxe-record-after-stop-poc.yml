@@ -43,6 +43,22 @@ jobs:
           mkdir -p dist
           go build -trimpath -ldflags="-s -w" -o dist/go2rtc-record-after-stop-poc-linux-amd64 .
           sha256sum dist/go2rtc-record-after-stop-poc-linux-amd64 > dist/SHA256SUMS.txt
+      - name: Build isolated Home Assistant local POC test app package
+        run: |
+          bash -n packaging/haos-local-poc2/run.sh
+          mkdir -p staging/luxe_after_stop_poc2
+          cp packaging/haos-local-poc2/config.yaml staging/luxe_after_stop_poc2/
+          cp packaging/haos-local-poc2/Dockerfile staging/luxe_after_stop_poc2/
+          cp packaging/haos-local-poc2/run.sh staging/luxe_after_stop_poc2/
+          cp dist/go2rtc-record-after-stop-poc-linux-amd64 staging/luxe_after_stop_poc2/go2rtc
+          chmod +x staging/luxe_after_stop_poc2/go2rtc
+          tar -C staging -czf dist/luxe-after-stop-poc2-local-app-amd64.tar.gz luxe_after_stop_poc2
+          sha256sum dist/luxe-after-stop-poc2-local-app-amd64.tar.gz >> dist/SHA256SUMS.txt
+      - name: Verify POC test app archive
+        run: |
+          tar tzf dist/luxe-after-stop-poc2-local-app-amd64.tar.gz | grep -F 'luxe_after_stop_poc2/config.yaml'
+          tar tzf dist/luxe-after-stop-poc2-local-app-amd64.tar.gz | grep -F 'luxe_after_stop_poc2/run.sh'
+          tar tzf dist/luxe-after-stop-poc2-local-app-amd64.tar.gz | grep -F 'luxe_after_stop_poc2/go2rtc'
       - name: Upload POC artifacts (not a release)
         uses: actions/upload-artifact@v4
         with:
