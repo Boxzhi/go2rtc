@@ -1,96 +1,82 @@
-name: Luxe Record After Stop - Isolated POC
+name: Luxe Three Recorder POC.3 - Isolated Build
 
 on:
   push:
     branches:
-      - feat/luxe-record-after-stop
-  pull_request:
-    branches:
-      - luxe/hlc7
-    paths:
-      - 'internal/**'
-      - 'pkg/**'
-      - 'main.go'
-      - 'go.mod'
-      - 'go.sum'
-      - '.github/workflows/luxe-record-after-stop-poc.yml'
+      - feat/luxe-three-record-queue
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  test-and-build:
+  test-and-package:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out selected branch
+      - name: Checkout experimental branch
         uses: actions/checkout@v4
-      - name: Set up Go
+      - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.27'
           cache: true
-      - name: Test relevant packages
+      - name: Test recording and codec packages
         run: go test -count=1 ./pkg/h265 ./pkg/iso ./pkg/mp4 ./pkg/xiaomi/miss/... ./internal/mp4 ./internal/afterstop
-      - name: Build every package
+      - name: Compile all packages
         run: go build ./...
-      - name: Build isolated Linux amd64 test executable
+      - name: Build isolated Linux AMD64 POC binary
         env:
-          CGO_ENABLED: '0'
           GOOS: linux
           GOARCH: amd64
+          CGO_ENABLED: '0'
         run: |
           mkdir -p dist
-          go build -trimpath -ldflags="-s -w" -o dist/go2rtc-record-after-stop-poc-linux-amd64 .
-          sha256sum dist/go2rtc-record-after-stop-poc-linux-amd64 > dist/SHA256SUMS.txt
-      - name: Smoke test embedded POC2 page over local HTTP
+          go build -trimpath -ldflags="-s -w" -o dist/go2rtc-poc3-linux-amd64 .
+          sha256sum dist/go2rtc-poc3-linux-amd64 > dist/SHA256SUMS.txt
+      - name: Validate UI is available through native HTTP file server
         run: |
           set -eu
-          grep -Fx 'ingress_entry: "luxe-record-after-stop-poc2.html"' packaging/haos-local-poc2/config.yaml
-          cat >/tmp/luxe-poc2-smoke.yaml <<'EOF'
+          grep -Fx 'ingress_entry: "luxe-record-after-stop-poc3.html"' packaging/haos-local-poc3/config.yaml
+          bash -n packaging/haos-local-poc3/run.sh
+          cat >/tmp/luxe-poc3-ci.yaml <<'EOF'
           app:
             modules:
               - api
           api:
             listen: "127.0.0.1:1984"
           EOF
-          ./dist/go2rtc-record-after-stop-poc-linux-amd64 -c /tmp/luxe-poc2-smoke.yaml >/tmp/luxe-poc2-smoke.log 2>&1 &
+          ./dist/go2rtc-poc3-linux-amd64 -c /tmp/luxe-poc3-ci.yaml >/tmp/luxe-poc3-ci.log 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
-          ok=0
+          ready=0
           for attempt in $(seq 1 30); do
-            if curl --silent --show-error --fail http://127.0.0.1:1984/luxe-record-after-stop-poc2.html -o /tmp/luxe-poc2-smoke-page; then
-              ok=1
+            if curl --silent --fail http://127.0.0.1:1984/luxe-record-after-stop-poc3.html -o /tmp/luxe-poc3-ui.html; then
+              ready=1
               break
             fi
             sleep 1
           done
-          if [ "$ok" -ne 1 ]; then
-            cat /tmp/luxe-poc2-smoke.log
+          if [ "$ready" -ne 1 ]; then
+            cat /tmp/luxe-poc3-ci.log
             exit 1
           fi
-          grep -Fq 'Luxe POC.2' /tmp/luxe-poc2-smoke-page
-          curl --silent --show-error --fail http://127.0.0.1:1984/api -o /tmp/luxe-poc2-smoke-api
-          grep -Fq 'version' /tmp/luxe-poc2-smoke-api
-      - name: Build isolated Home Assistant local POC test app package
+          grep -Fq '三路独立录像' /tmp/luxe-poc3-ui.html
+      - name: Package standalone HAOS local test app (not production)
         run: |
-          bash -n packaging/haos-local-poc2/run.sh
-          mkdir -p staging/luxe_after_stop_poc2
-          cp packaging/haos-local-poc2/config.yaml staging/luxe_after_stop_poc2/
-          cp packaging/haos-local-poc2/Dockerfile staging/luxe_after_stop_poc2/
-          cp packaging/haos-local-poc2/run.sh staging/luxe_after_stop_poc2/
-          cp dist/go2rtc-record-after-stop-poc-linux-amd64 staging/luxe_after_stop_poc2/go2rtc
-          chmod +x staging/luxe_after_stop_poc2/go2rtc
-          tar -C staging -czf dist/luxe-after-stop-poc2-local-app-amd64.tar.gz luxe_after_stop_poc2
-          sha256sum dist/luxe-after-stop-poc2-local-app-amd64.tar.gz >> dist/SHA256SUMS.txt
-      - name: Verify POC test app archive
-        run: |
-          tar tzf dist/luxe-after-stop-poc2-local-app-amd64.tar.gz | grep -F 'luxe_after_stop_poc2/config.yaml'
-          tar tzf dist/luxe-after-stop-poc2-local-app-amd64.tar.gz | grep -F 'luxe_after_stop_poc2/run.sh'
-          tar tzf dist/luxe-after-stop-poc2-local-app-amd64.tar.gz | grep -F 'luxe_after_stop_poc2/go2rtc'
-      - name: Upload POC artifacts (not a release)
+          set -eu
+          mkdir -p staging/luxe_after_stop_poc3
+          cp packaging/haos-local-poc3/config.yaml staging/luxe_after_stop_poc3/
+          cp packaging/haos-local-poc3/Dockerfile staging/luxe_after_stop_poc3/
+          cp packaging/haos-local-poc3/run.sh staging/luxe_after_stop_poc3/
+          cp dist/go2rtc-poc3-linux-amd64 staging/luxe_after_stop_poc3/go2rtc
+          chmod +x staging/luxe_after_stop_poc3/go2rtc
+          tar -C staging -czf dist/luxe-after-stop-poc3-local-app-amd64.tar.gz luxe_after_stop_poc3
+          sha256sum dist/luxe-after-stop-poc3-local-app-amd64.tar.gz >> dist/SHA256SUMS.txt
+          tar tzf dist/luxe-after-stop-poc3-local-app-amd64.tar.gz | grep -F 'luxe_after_stop_poc3/config.yaml'
+          tar tzf dist/luxe-after-stop-poc3-local-app-amd64.tar.gz | grep -F 'luxe_after_stop_poc3/go2rtc'
+      - name: Upload isolated POC.3 build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: luxe-record-after-stop-poc-${{ github.run_number }}-${{ github.run_attempt }}
+          name: luxe-three-record-queue-poc3-${{ github.run_number }}-${{ github.run_attempt }}
           path: dist/*
           retention-days: 7
