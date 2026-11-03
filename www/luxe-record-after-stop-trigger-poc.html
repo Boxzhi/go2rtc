@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Luxe 录像结束后自动下载 · POC.1</title>
+  <style>
+    :root { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; line-height:1.55; color-scheme:light dark; }
+    body { max-width:670px; margin:0 auto; padding:20px 16px 40px; }
+    h1 { font-size:23px; line-height:1.3; margin:0 0 8px; }
+    h2 { font-size:17px; margin:0 0 8px; }
+    p, small { opacity:.8; }
+    section { padding:16px; border:1px solid #8793a05c; border-radius:14px; margin:16px 0; }
+    input { box-sizing:border-box; width:100%; font-size:16px; border:1px solid #8793a080; padding:11px; border-radius:9px; margin-top:8px; background:transparent; color:inherit; }
+    label { display:block; font-weight:600; }
+    button { font:inherit; font-weight:650; border:0; border-radius:10px; padding:12px; min-height:44px; background:#385cbb; color:#fff; margin:8px 6px 0 0; cursor:pointer; }
+    button.secondary { background:#697586; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    #log { padding:12px; min-height:74px; font:12px/1.5 ui-monospace,monospace; white-space:pre-wrap; overflow-wrap:anywhere; border-radius:9px; background:#8793a016; }
+    .warning { font-size:13px; border-left:3px solid #cd9c42; padding-left:12px; }
+    .status { font-weight:600; }
+  </style>
+</head>
+<body>
+  <h1>Luxe · POC.1 自动下载触发</h1>
+  <p>只检验官方 Home Assistant iOS App：异步事件发生后，不再次点击下载按钮，能否由 WKDownload 接管同源 MP4 附件。</p>
+  <p class="warning">本测试不录制视频、不写录像文件、不修改直播流，也不会检验长视频 MP4 的完整性。服务端仅生成当前画面的单帧 MP4。测试点击无法证明系统已完成原生下载或“存储到文件”。</p>
+
+  <section>
+    <h2>测试配置</h2>
+    <label for="source">go2rtc 流名称</label>
+    <input id="source" autocomplete="off" autocapitalize="off" spellcheck="false" value="jinghuafu_canting_2k">
+    <small>必须是当前已配置、可连接的 go2rtc 流；若单帧 MP4 无法生成，本测试不成立。</small>
+    <p>下载路径：当前页面同源的 <code>api/frame.mp4</code>，响应自带 <code>Content-Disposition: attachment</code>。</p>
+  </section>
+
+  <section>
+    <h2>对照：用户点击立即下载</h2>
+    <button id="manual">立即触发 MP4 下载</button>
+    <p>先验证单帧 MP4 可以进入 HA App 原生下载管理器。如失败，应先排查流及访问路径，不继续异步测试。</p>
+  </section>
+
+  <section>
+    <h2>关键：模拟录像结束后的异步下载</h2>
+    <button id="schedule">模拟录制完成，8 秒后自动触发</button>
+    <button id="cancel" class="secondary" disabled>取消倒计时</button>
+    <p>点击“模拟录制完成”后，不需要再点击任何按钮。8 秒后由定时器自动执行与手动测试完全相同的 MP4 导航。</p>
+    <p>另可使用本页 URL 附加 <code>?autorun=1&amp;src=流名称</code>：页面加载后自动倒计时，不点击按钮也执行测试。</p>
+    <p class="status" id="state" aria-live="polite">尚未开始</p>
+  </section>
+
+  <section>
+    <h2>诊断日志</h2>
+    <div id="log" aria-live="polite"></div>
+    <p class="warning">页面里的“已尝试触发”不等于成功创建 WKDownload。只有看到 HA App 原生下载弹窗及实际文件，才可以认定对应步骤成功。关闭弹窗可能取消和删除下载中的文件。</p>
+  </section>
+
+  <script>
+    (() => {
+      "use strict";
+      const el = id => document.getElementById(id);
+      const query = new URLSearchParams(location.search);
+      const source = el("source");
+      const state = el("state");
+      const logBox = el("log");
+      const scheduleButton = el("schedule");
+      const cancelButton = el("cancel");
+      let timer = null;
+      let countdown = null;
+      let attempts = 0;
+      if (query.has("src")) source.value = query.get("src").slice(0,128);
+      function log(message) {
+        const t = new Date().toLocaleTimeString();
+        logBox.textContent += "[" + t + "] " + message + "\n";
+      }
+      function clearTimers() {
+        if (timer !== null) clearTimeout(timer);
+        if (countdown !== null) clearInterval(countdown);
+        timer = null; countdown = null;
+        scheduleButton.disabled = false;
+        cancelButton.disabled = true;
+      }
+      function launch(how) {
+        const stream = source.value.trim();
+        if (!stream || stream.length > 128) {
+          log("无法测试：流名称为空或太长");
+          state.textContent = "无效的流名称";
+          return;
+        }
+        const filename = "luxe-after-stop-" + String(++attempts).padStart(2, "0") + ".mp4";
+        const url = new URL("./api/frame.mp4", location.href);
+        url.searchParams.set("src", stream);
+        url.searchParams.set("filename", filename);
+        url.searchParams.set("_", String(Date.now()));
+        const anchor = document.createElement("a");
+        anchor.href = url.href;
+        anchor.download = filename;
+        anchor.style.display = "none";
+        document.body.appendChild(anchor);
+        log(how + "：执行 anchor.click()，文件名 " + filename);
+        state.textContent = "已请求下载；请观察 HA App 是否弹出原生下载管理器";
+        try {
+          anchor.click();
+        } catch (e) {
+          log("触发异常：" + String(e));
+          state.textContent = "JS 触发失败";
+        } finally {
+          anchor.remove();
+        }
+      }
+      function startCountdown() {
+        clearTimers();
+        scheduleButton.disabled = true;
+        cancelButton.disabled = false;
+        const start = performance.now();
+        const duration = 8000;
+        log("模拟录像正在完成；不再需要任何点击，8 秒后自动触发同源 MP4 附件导航");
+        countdown = setInterval(() => {
+          const seconds = Math.max(0, Math.ceil((duration - (performance.now() - start)) / 1000));
+          state.textContent = "模拟封装中，" + seconds + " 秒后自动触发……";
+        }, 250);
+        timer = setTimeout(() => {
+          clearTimers();
+          launch("异步完成回调");
+        }, duration);
+      }
+      el("manual").addEventListener("click", () => launch("用户直接点击"));
+      scheduleButton.addEventListener("click", startCountdown);
+      cancelButton.addEventListener("click", () => {
+        clearTimers(); state.textContent = "已取消"; log("取消自动下载触发测试");
+      });
+      log("POC.1 已加载。UA: " + navigator.userAgent);
+      if (query.get("autorun") === "1") {
+        log("页面 URL 包含 autorun=1，自动启动倒计时");
+        startCountdown();
+      }
+    })();
+  </script>
+</body>
+</html>
