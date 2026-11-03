@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Luxe POC.2 录制结束自动下载</title>
+  <style>
+    :root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:light dark}
+    body{max-width:720px;margin:auto;padding:20px 16px 40px;line-height:1.6}
+    h1{font-size:22px;margin:0 0 6px}
+    h2{font-size:17px;margin:0}
+    p,small{opacity:.8}
+    section{padding:15px;margin:15px 0;border:1px solid #94a3b866;border-radius:14px}
+    label{display:block;font-weight:600;margin-top:12px}
+    input,select{width:100%;box-sizing:border-box;font-size:16px;padding:10px;border:1px solid #94a3b888;border-radius:9px;background:transparent;color:inherit}
+    button{border:0;border-radius:10px;padding:12px 14px;background:#2368c0;color:white;font-weight:700;font-size:15px;margin:8px 7px 0 0;min-height:44px}
+    button.secondary{background:#677488}
+    button:disabled{opacity:.48}
+    #status{font-weight:700}
+    #log{font:12px/1.5 ui-monospace,SFMono-Regular,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:#94a3b824;border-radius:10px;padding:12px;min-height:80px}
+    .warn{padding:9px;border-left:3px solid #f59e0b;font-size:13px}
+    code{overflow-wrap:anywhere}
+  </style>
+</head>
+<body>
+  <h1>Luxe POC.2 · 真实录像结束后自动下载</h1>
+  <p>单路 3～30 秒。由独立 go2rtc 测试实例录制并暂存完整 MP4；停止/到期后，由网页自动请求 HA App 原生 WKDownload。此测试不修改正式版。</p>
+  <p class="warn">必须在隔离的 go2rtc 测试实例中使用。本功能默认关闭；录制会消耗测试实例的临时磁盘空间。下载完成不等于用户已将文件保存到 iOS「文件」App。</p>
+  <section>
+    <h2>测试参数</h2>
+    <label for="key">POC 专用密钥（仅用于 API 请求）</label>
+    <input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="输入独立测试实例配置的密钥">
+    <label for="src">测试流名（测试实例中的 stream 名称）</label>
+    <input id="src" value="poc_camera" spellcheck="false" autocapitalize="off">
+    <label for="duration">录制时长</label>
+    <select id="duration">
+      <option value="5">5 秒</option>
+      <option value="10" selected>10 秒</option>
+      <option value="20">20 秒</option>
+      <option value="30">30 秒</option>
+    </select>
+    <p>先使用能稳定播放的测试流，并确保与正式版连接端口互不冲突。</p>
+    <button id="start">开始录像（结束后自动下载）</button>
+    <button id="stop" class="secondary" disabled>现在停止录像</button>
+  </section>
+  <section>
+    <h2>当前状态</h2>
+    <div id="status">尚未开始</div>
+    <div id="detail"></div>
+    <button id="retry" disabled>手动重试下载当前 MP4</button>
+    <p><small>当出现“已请求原生下载”时，请检查 HA App 是否自动弹出原生下载 Sheet。页面无法可靠判断 WKDownload 是否完成或是否真正保存。</small></p>
+  </section>
+  <section>
+    <h2>调试日志</h2>
+    <div id="log"></div>
+  </section>
+  <script>
+    (() => {
+      "use strict";
+      const el=id=>document.getElementById(id);
+      const base=new URL("./api/luxe/poc2/",location.href);
+      let current=null, polling=null, downloadURL="", triggered=false;
+      function write(message){
+        const time=new Date().toLocaleTimeString();
+        el("log").textContent+="["+time+"] "+message+"\n";
+      }
+      function state(message){el("status").textContent=message;write(message);}
+      function apiURL(suffix){return new URL(suffix,base).toString();}
+      function apiHeaders(json=false){
+        const v={"X-Luxe-POC-Key":el("key").value.trim()};
+        if(json)v["Content-Type"]="application/json";
+        return v;
+      }
+      async function request(path,options={}){
+        const response=await fetch(apiURL(path),{cache:"no-store",...options});
+        const data=await response.json().catch(()=>({error:"invalid JSON response"}));
+        if(!response.ok)throw new Error(data.error||"HTTP "+response.status);
+        return data;
+      }
+      function nativeDownload(downloadPath){
+        const full=new URL(downloadPath,location.href);
+        if(full.origin!==location.origin)throw Error("download URL must be same origin");
+        const link=document.createElement("a");
+        link.href=full.href;
+        link.download=current?.filename||"luxe-poc2.mp4";
+        link.style.display="none";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        state("已请求原生下载；请观察 HA App 是否自动弹出下载管理界面");
+        write("download URL: "+full.pathname+" (token hidden)");
+      }
+      async function check(){
+        if(!current)return;
+        try{
+          const v=await request("status/"+encodeURIComponent(current.id),{headers:apiHeaders()});
+          current=v;
+          el("detail").textContent="状态: "+v.state+" | 大小: "+(v.bytes/1048576).toFixed(2)+" MiB"+
+            " | 视频: "+(v.video_codec||"未知")+" | 音频: "+(v.audio_codec||"无/未知");
+          if(v.state==="ready"){
+            clearInterval(polling); polling=null;
+            downloadURL=v.download_url;
+            el("stop").disabled=true;el("start").disabled=false;el("retry").disabled=false;
+            state("服务端录像完成；MP4 已就绪，尝试自动启动原生下载");
+            if(!triggered){
+              triggered=true;
+              nativeDownload(downloadURL);
+            }
+          } else if(v.state==="failed"){
+            clearInterval(polling);polling=null;
+            el("stop").disabled=true;el("start").disabled=false;
+            state("录像失败: "+(v.message||"未知错误"));
+          } else {
+            el("status").textContent="服务端录像状态: "+v.state;
+          }
+        }catch(err){
+          write("状态查询失败: "+String(err));
+        }
+      }
+      el("start").addEventListener("click",async()=>{
+        if(polling){clearInterval(polling);polling=null;}
+        triggered=false;downloadURL="";current=null;
+        el("retry").disabled=true;el("stop").disabled=true;el("start").disabled=true;
+        try{
+          const key=el("key").value.trim();
+          if(key.length<24)throw Error("测试密钥长度不足 24");
+          const src=el("src").value.trim();
+          if(!src)throw Error("请填写测试流名");
+          const v=await request("start",{
+            method:"POST",headers:apiHeaders(true),
+            body:JSON.stringify({source:src,duration_seconds:Number(el("duration").value)})
+          });
+          current=v;el("stop").disabled=false;
+          state("录像启动成功，等待 "+v.duration_seconds+" 秒后自动完成（无需再点击）");
+          polling=setInterval(check,700);
+          void check();
+        }catch(err){
+          el("start").disabled=false;
+          state("启动失败: "+String(err));
+        }
+      });
+      el("stop").addEventListener("click",async()=>{
+        if(!current)return;
+        el("stop").disabled=true;
+        try{
+          await request("stop/"+encodeURIComponent(current.id),{method:"POST",headers:apiHeaders()});
+          state("已发送停止请求，等待 MP4 封装完成");
+        }catch(err){el("stop").disabled=false;state("停止失败: "+String(err));}
+      });
+      el("retry").addEventListener("click",()=>{
+        if(downloadURL){
+          try{nativeDownload(downloadURL);}catch(err){state("手动下载触发失败: "+String(err));}
+        }
+      });
+      write("POC.2 已加载；所有 MP4 下载均由实际录制结束事件触发");
+    })();
+  </script>
+</body>
+</html>
