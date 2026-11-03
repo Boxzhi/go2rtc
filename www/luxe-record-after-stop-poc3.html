@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Luxe POC.3 · 三路录制与顺序下载</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:light dark}
+body{margin:0 auto;max-width:700px;padding:16px 14px 36px;line-height:1.5}
+h1{font-size:22px;margin:2px 0 8px}h2{font-size:17px;margin:0 0 12px}
+section{padding:15px;border:1px solid #8b95a35b;border-radius:15px;margin:14px 0}
+p,small{color:var(--secondary,#7f8a9a)}
+label{font-size:14px;font-weight:650;display:block;margin-bottom:6px}
+input,select{box-sizing:border-box;width:100%;border:1px solid #8b95a385;border-radius:10px;background:transparent;color:inherit;padding:12px;font-size:16px}
+button{border:0;background:#2466b9;color:white;font:650 15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;border-radius:10px;padding:12px 14px;min-height:44px;margin:6px 5px 0 0}
+button:disabled{opacity:.45}button.alt{background:#66778c}
+button.block{width:100%;margin-left:0;margin-right:0}
+.row{display:flex;gap:12px;align-items:center;justify-content:space-between;margin:10px 0;padding:12px;background:#8294a317;border-radius:12px}
+.cell{min-width:0;flex:1}.cell b,.cell small{display:block}
+.tag{font-size:12px;color:#669bd5;white-space:nowrap}
+.warn{border-left:3px solid #e7a53c;padding:8px 10px;font-size:13px;margin:12px 0}
+#log{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.6 ui-monospace,Menlo,monospace;max-height:260px;overflow-y:auto;padding:12px;background:#8392a81b;border-radius:9px}
+.status{font-weight:700}
+button.accent{background:#007c95}
+</style>
+</head>
+<body>
+<h1>Luxe POC.3 · 三路独立录像</h1>
+<p>3 路服务端并发录制 → 全部结束后自动下载第一路 → 用户保存后继续下一路。官方 HA iOS App 不作任何修改。</p>
+<p class="warn">仅供独立 HAOS 测试 App 使用。当前每路 5～30 秒，最长 30 分钟尚未开放。文件暂存于测试容器中；系统无法自动确认“保存到文件”是否成功。</p>
+<section>
+<h2>测试配置</h2>
+<label for="key">POC 专用密钥（仅发送给独立实例）</label>
+<input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="填写测试 App 配置中的 secret">
+<label for="duration" style="margin-top:12px">本次三路录像时长</label>
+<select id="duration"><option value="5">5 秒</option><option value="10" selected>10 秒</option><option value="20">20 秒</option><option value="30">30 秒</option></select>
+<p>三路固定测试流：<code>poc_camera_1</code>、<code>poc_camera_2</code>、<code>poc_camera_3</code>，分别转发正式版已存在的视频流。</p>
+<button id="start" class="block">同时开始三路录像</button>
+<button id="stop" class="alt block" disabled>停止全部正在录制的任务</button>
+</section>
+<section>
+<h2>三路录像状态</h2>
+<div id="streams"></div>
+<div id="summary" class="status">尚未开始</div>
+</section>
+<section>
+<h2>原生下载队列</h2>
+<p>三个 MP4 各自独立。第一路自动启动；后续每一路均需在原生界面保存并返回后手动确认，以避免同时存在多个 WKDownload Sheet。</p>
+<div id="current" class="status">等待录像完成</div>
+<button id="retry" class="alt" disabled>重试当前下载</button>
+<button id="next" class="accent" disabled>我已保存，下载下一路</button>
+<p><small>“我已保存”是你的操作确认，并非 HA App 原生回调。取消或失败时请使用重试，不要把失败标为已保存。</small></p>
+</section>
+<section>
+<h2>调试日志</h2>
+<div id="log"></div>
+</section>
+<script>
+(()=>{
+ "use strict";
+ const el=id=>document.getElementById(id);
+ const sources=[
+   {name:"poc_camera_1",title:"客厅移动"},
+   {name:"poc_camera_2",title:"客厅固定"},
+   {name:"poc_camera_3",title:"餐厅"}
+ ];
+ const apiBase=new URL("./api/luxe/poc3/",location.href);
+ let records=[],pollTimer=null,queue=[],cursor=0,downloadStarted=false,groupLocked=false,groupStarted=false;
+ function log(message){
+   const at=new Date().toLocaleTimeString();
+   el("log").textContent+="["+at+"] "+message+"\n";
+   el("log").scrollTop=el("log").scrollHeight;
+ }
+ function summary(message){el("summary").textContent=message;log(message);}
+ function makeURL(suffix){return new URL(suffix,apiBase).href;}
+ function headers(json=false){
+   const key=el("key").value.trim();
+   const h={"X-Luxe-POC-Key":key};
+   if(json)h["Content-Type"]="application/json";
+   return h;
+ }
+ async function call(suffix, init={}){
+   const res=await fetch(makeURL(suffix),{cache:"no-store",...init});
+   const value=await res.json().catch(()=>({error:"invalid JSON response"}));
+   if(!res.ok)throw Error(value.error||"HTTP "+res.status);
+   return value;
+ }
+ function rows(){
+   const root=el("streams");
+   root.replaceChildren();
+   for(let i=0;i<sources.length;i++){
+     const item=sources[i];
+     const record=records.find(r=>r.source===item.name);
+     const node=document.createElement("div");node.className="row";
+     const left=document.createElement("div");left.className="cell";
+     const main=document.createElement("b");main.textContent=item.title;
+     const detail=document.createElement("small");
+     if(record){
+       detail.textContent=record.state+" · "+(record.bytes/1048576).toFixed(2)+" MiB · "+(record.video_codec||"视频待定")+(record.audio_codec?" / "+record.audio_codec:"");
+     }else detail.textContent=groupStarted?"尚未创建/启动失败":"等待开始";
+     left.append(main,detail);
+     const state=document.createElement("span");state.className="tag";state.textContent=record?record.state:"未开始";
+     node.append(left,state);root.append(node);
+   }
+ }
+ function resetTimer(){
+   if(pollTimer!==null)clearInterval(pollTimer);
+   pollTimer=null;
+ }
+ async function poll(){
+   if(!records.length)return;
+   const settled=await Promise.allSettled(records.map(r=>call("status/"+encodeURIComponent(r.id),{headers:headers()})));
+   settled.forEach((value,i)=>{
+     if(value.status==="fulfilled") records[i]=value.value;
+     else log(records[i].source+" 状态查询失败："+String(value.reason));
+   });
+   rows();
+   if(records.some(r=>r.state==="recording"||r.state==="stopping"))return;
+   resetTimer();
+   el("stop").disabled=true;
+   el("start").disabled=false;
+   if(records.length!==3 || records.some(r=>r.state!=="ready")){
+     summary("至少一路录制失败或缺失。不会自动启动下载；请查看日志，不要误判成功。");
+     return;
+   }
+   if(groupLocked)return;
+   groupLocked=true;
+   queue=[...records].sort((a,b)=>sources.findIndex(s=>s.name===a.source)-sources.findIndex(s=>s.name===b.source));
+   cursor=0;
+   summary("三路 MP4 均已就绪。准备自动启动第一路原生下载。");
+   startDownload();
+ }
+ function renderQueue(){
+   const item=queue[cursor];
+   if(!item){
+     el("current").textContent=cursor>=3&&queue.length===3?"三路均已由用户确认保存":"等待三路 MP4 就绪";
+     el("retry").disabled=true;el("next").disabled=true;
+     return;
+   }
+   el("current").textContent="第 "+(cursor+1)+" / 3 路："+sources[cursor].title+" — "+item.filename+"（"+(item.bytes/1048576).toFixed(2)+" MiB）";
+   el("retry").disabled=false;
+   el("next").disabled=false;
+   el("next").textContent=cursor===2?"我已保存最后一路，完成":"我已保存，下载下一路";
+ }
+ function startDownload(){
+   if(downloadStarted)return;
+   const item=queue[cursor];
+   if(!item||!item.download_url){summary("当前 MP4 无下载地址");return;}
+   const full=new URL(item.download_url,location.href);
+   if(full.origin!==location.origin){summary("拒绝跨源下载 URL");return;}
+   downloadStarted=true;
+   renderQueue();
+   const a=document.createElement("a");
+   a.href=full.href;a.download=item.filename;a.style.display="none";
+   document.body.append(a);
+   try {
+     a.click();
+     log("第 "+(cursor+1)+" 路：已请求 WKDownload；等待用户保存后确认（不记录 token）");
+   }catch(err){downloadStarted=false;log("原生下载请求失败："+String(err));}
+   finally{a.remove();}
+ }
+ async function beginAll(){
+   if(groupStarted&&records.some(r=>r.state==="recording"||r.state==="stopping"))return;
+   if(el("key").value.trim().length<24){summary("请填写长度至少 24 的 POC 密钥");return;}
+   groupStarted=true;groupLocked=false;downloadStarted=false;queue=[];cursor=0;records=[];
+   resetTimer();el("start").disabled=true;el("stop").disabled=true;
+   renderQueue();rows();
+   const duration=Number(el("duration").value);
+   summary("已请求三路开始录制（请求并发发起）");
+   const answers=await Promise.allSettled(sources.map(item=>call("start",{
+     method:"POST",headers:headers(true),
+     body:JSON.stringify({source:item.name,duration_seconds:duration})
+   })));
+   answers.forEach((answer,index)=>{
+     if(answer.status==="fulfilled"){records.push(answer.value);log(sources[index].title+"：录制会话已建立");}
+     else log(sources[index].title+"：启动失败："+String(answer.reason));
+   });
+   rows();
+   if(!records.length){summary("三路均无法启动，请检查独立测试实例日志");el("start").disabled=false;return;}
+   el("stop").disabled=false;
+   if(records.length!==3)summary("部分流启动失败，已启动的会继续录制，但不会自动下载。");
+   pollTimer=setInterval(()=>void poll(),1000);
+   void poll();
+ }
+ el("start").addEventListener("click",()=>void beginAll());
+ el("stop").addEventListener("click",async()=>{
+   el("stop").disabled=true;
+   const all=records.filter(r=>r.state==="recording");
+   const answers=await Promise.allSettled(all.map(r=>call("stop/"+encodeURIComponent(r.id),{
+     method:"POST",headers:headers()
+   })));
+   answers.forEach((answer,index)=>log(all[index].source+(answer.status==="fulfilled"?"：停止已提交":"：停止失败："+String(answer.reason))));
+ });
+ el("retry").addEventListener("click",()=>{
+   downloadStarted=false;
+   log("手动重试当前路下载；不代表先前文件保存成功");
+   startDownload();
+ });
+ el("next").addEventListener("click",()=>{
+   if(!queue[cursor])return;
+   log(sources[cursor].title+"：用户声明已保存；非原生确认回调");
+   cursor++;downloadStarted=false;
+   if(cursor>=queue.length){renderQueue();summary("三个文件均由用户确认已保存；验证结束。");return;}
+   startDownload();
+ });
+ rows();renderQueue();log("POC.3 已加载；最多 3 路短时录制，不修改 HA App");
+})();
+</script>
+</body></html>
