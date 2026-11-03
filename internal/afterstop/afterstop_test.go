@@ -29,7 +29,7 @@ func TestSessionViewReadyOnly(t *testing.T) {
 
 func TestAuthorize(t *testing.T) {
 	m:=&manager{secret:strings.Repeat("a",32)}
-	r:=httptest.NewRequest(http.MethodPost,"/api/luxe/poc2/start",nil)
+	r:=httptest.NewRequest(http.MethodPost,"/api/luxe/poc3/start",nil)
 	if m.authorized(r) {t.Fatal("no key should be denied")}
 	r.Header.Set("X-Luxe-POC-Key",strings.Repeat("b",32))
 	if m.authorized(r) {t.Fatal("wrong key should be denied")}
@@ -46,14 +46,14 @@ func TestDownloadCapabilityAndRange(t *testing.T) {
 		"abc":{id:"abc",token:"secret123",state:"ready",path:path,filename:"record.mp4",expires:time.Now().Add(time.Minute)},
 	}}
 	wrong:=httptest.NewRecorder()
-	m.handle(wrong,httptest.NewRequest(http.MethodGet,"/api/luxe/poc2/download/abc?token=wrong",nil))
+	m.handle(wrong,httptest.NewRequest(http.MethodGet,"/api/luxe/poc3/download/abc?token=wrong",nil))
 	if wrong.Code!=http.StatusNotFound {t.Fatalf("wrong token: %d",wrong.Code)}
 	get:=httptest.NewRecorder()
-	m.handle(get,httptest.NewRequest(http.MethodGet,"/api/luxe/poc2/download/abc?token=secret123",nil))
+	m.handle(get,httptest.NewRequest(http.MethodGet,"/api/luxe/poc3/download/abc?token=secret123",nil))
 	if get.Code!=http.StatusOK {t.Fatalf("download: %d body=%s",get.Code,get.Body)}
 	if !bytes.Equal(get.Body.Bytes(),content) {t.Fatal("bad data")}
 	if !strings.Contains(get.Header().Get("Content-Disposition"),"attachment") {t.Fatal("missing attachment header")}
-	r:=httptest.NewRequest(http.MethodGet,"/api/luxe/poc2/download/abc?token=secret123",nil)
+	r:=httptest.NewRequest(http.MethodGet,"/api/luxe/poc3/download/abc?token=secret123",nil)
 	r.Header.Set("Range","bytes=0-3")
 	rangeResponse:=httptest.NewRecorder()
 	m.handle(rangeResponse,r)
@@ -70,4 +70,17 @@ func TestPruneRemovesExpired(t *testing.T) {
 	m.pruneLocked(time.Now())
 	if _,ok:=m.sessions["old"];ok {t.Fatal("expired session retained")}
 	if _,err:=os.Stat(path);!os.IsNotExist(err) {t.Fatalf("expired file retained: %v",err)}
+}
+
+func TestThreeRecordingSlots(t *testing.T) {
+	m:=&manager{activeIDs:make(map[string]string)}
+	names:=[]string{"poc_camera_1","poc_camera_2","poc_camera_3"}
+	for i,name:=range names {
+		if len(m.activeIDs)>=maxActive {t.Fatalf("slot %d unavailable",i)}
+		m.activeIDs[name]=name
+	}
+	if len(m.activeIDs)!=maxActive {t.Fatalf("expected %d active slots, got %d", maxActive,len(m.activeIDs))}
+	if len(m.activeIDs)<maxActive {t.Fatal("fourth recording unexpectedly allowed")}
+	delete(m.activeIDs,"poc_camera_2")
+	if len(m.activeIDs)>=maxActive {t.Fatal("released recording slot not available")}
 }
