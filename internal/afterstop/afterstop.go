@@ -16,7 +16,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -92,16 +91,17 @@ func Init() {
 		} `yaml:"luxe_after_stop_poc"`
 	}
 	app.LoadConfig(&cfg)
+	log := app.GetLogger("afterstop")
 	if !cfg.Mod.Enabled {
 		return
 	}
 	if len(cfg.Mod.Secret) < 24 {
-		app.GetLogger("afterstop").Error().Msg("POC disabled: luxe_after_stop_poc.secret must contain at least 24 characters")
+		log.Error().Msg("POC disabled: luxe_after_stop_poc.secret must contain at least 24 characters")
 		return
 	}
 	dir, err := os.MkdirTemp("", "luxe-after-stop-poc2-")
 	if err != nil {
-		app.GetLogger("afterstop").Error().Err(err).Msg("POC disabled: cannot create temporary recording directory")
+		log.Error().Err(err).Msg("POC disabled: cannot create temporary recording directory")
 		return
 	}
 	m := &manager{
@@ -111,7 +111,7 @@ func Init() {
 	}
 	api.HandleFunc("api/luxe/poc2/", m.handle)
 	go m.janitor()
-	app.GetLogger("afterstop").Warn().Str("temp_dir", dir).Msg("POC.2 enabled: single camera, 30 seconds maximum, 256 MiB file limit")
+	log.Warn().Str("temp_dir", dir).Msg("POC.2 enabled: single camera, 30 seconds maximum, 256 MiB file limit")
 }
 
 func newID() (string, error) {
@@ -424,6 +424,5 @@ func (m *manager) download(w http.ResponseWriter, r *http.Request, id string) {
 	http.ServeContent(w, r, filename, info.ModTime(), file)
 }
 
-// Do not use as a production recording subsystem. This POC is deliberately
-// short-lived, single-stream, and guarded with a configured test-only secret.
-var _ = strconv.Itoa
+// Do not use as a production recording subsystem.
+// This POC is deliberately short-lived, single-stream and test-only.
