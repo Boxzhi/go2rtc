@@ -35,9 +35,8 @@ No formal GitHub Release is created. Do not install the standalone binary over t
 3. Open the **Terminal & SSH** app of Home Assistant OS and run:
 
    ```sh
-   mkdir -p /local_apps
-   tar -xzf /share/luxe-after-stop-poc2-local-app-amd64.tar.gz -C /local_apps
-   ls -la /local_apps/luxe_after_stop_poc2/
+   tar -xzf /config/www/luxe-after-stop-poc2-local-app-amd64.tar.gz -C /addons/local
+   ls -la /addons/local/luxe_after_stop_poc2/
    ```
 
 4. In Home Assistant go to **Settings → Apps → Install app** and choose **Check for updates**. The new app should appear under **Local apps** as `Luxe After-Stop Recording POC.2` (slug `local_luxe_after_stop_poc2`).
@@ -75,3 +74,9 @@ Stop/uninstall only `Luxe After-Stop Recording POC.2` in Settings → Apps. For 
 - No JS API exists for reliable native WKDownload completion / Save-to-Files confirmation. It deliberately launches at most one download; no fixed-delay multi-download queue is implemented.
 - This POC's download link uses a random query capability, rather than exposing Home Assistant tokens; treat the link as sensitive and do not share it.
 - The HAOS app source config may contain RTSP credentials. Treat configuration and logs as sensitive; do not post real URLs or passwords publicly.
+
+## POC.2 v0.2.1 — 404 ingress fix
+
+The 0.2.0 local app used an ingress_entry with a leading slash. The Supervisor ingress URL constructor already emits a trailing slash after the token, causing a doubled slash. 0.2.1 changes `ingress_entry` to `luxe-record-after-stop-poc2.html` (no leading slash) and tests the embedded HTTP page in CI.
+
+To update an **installed** 0.2.0 local POC app, stop the POC app (not the production go2rtc), unpack the new 0.2.1 package over `/addons/local/luxe_after_stop_poc2` and use the app store **Check for updates** / update route to rebuild the isolated app. The new image version should say **0.2.1**. Do not assume restarting the installed 0.2.0 container refreshes its baked configuration or binary.
