@@ -100,7 +100,7 @@ func Init() {
 		log.Error().Msg("POC disabled: luxe_after_stop_poc.secret must contain at least 24 characters")
 		return
 	}
-	dir, err := os.MkdirTemp("", "luxe-after-stop-poc2-")
+	dir, err := os.MkdirTemp("", "luxe-after-stop-poc3-")
 	if err != nil {
 		log.Error().Err(err).Msg("POC disabled: cannot create temporary recording directory")
 		return
@@ -239,29 +239,58 @@ func (m *manager) start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, err := newID()
-	if err != nil { reject(w, 500, "cannot create session ID"); return }
+	if err != nil {
+		reject(w, http.StatusInternalServerError, "cannot create session ID")
+		return
+	}
 	token, err := newID()
-	if err != nil { reject(w, 500, "cannot create download token"); return }
+	if err != nil {
+		reject(w, http.StatusInternalServerError, "cannot create download token")
+		return
+	}
 
+	// Reserve the camera and active slot first, then release the global lock.
+	// RTSP AddConsumer may block while negotiating a stream. Never hold the
+	// manager lock during network setup or it would serialize all three starts.
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.pruneLocked(time.Now())
 	if len(m.activeIDs) >= maxActive {
+		m.mu.Unlock()
 		reject(w, http.StatusConflict, "maximum three simultaneous recordings")
 		return
 	}
 	if _, active := m.activeIDs[request.Source]; active {
+		m.mu.Unlock()
 		reject(w, http.StatusConflict, "stream already being recorded")
 		return
 	}
-	count := 0
+	completed := 0
 	for _, s := range m.sessions {
-		if s.state == "ready" { count++ }
+		if s.state == "ready" {
+			completed++
+		}
 	}
-	if count >= maxCompleted {
+	if completed >= maxCompleted {
+		m.mu.Unlock()
 		reject(w, http.StatusInsufficientStorage, "too many completed POC files: allow cleanup before recording more")
 		return
 	}
+	m.activeIDs[request.Source] = id
+	m.mu.Unlock()
+
+	// Reservations are only released on errors. Successful reservations are
+	// released by the per-stream recording goroutine after finalization.
+	reserved := true
+	defer func() {
+		if !reserved {
+			return
+		}
+		m.mu.Lock()
+		if m.activeIDs[request.Source] == id {
+			delete(m.activeIDs, request.Source)
+		}
+		m.mu.Unlock()
+	}()
 
 	path := filepath.Join(m.dir, id + ".mp4")
 	file, err := os.OpenFile(path+".part", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
@@ -269,8 +298,8 @@ func (m *manager) start(w http.ResponseWriter, r *http.Request) {
 		reject(w, http.StatusInsufficientStorage, "cannot create temporary MP4")
 		return
 	}
-	// Use existing go2rtc MP4 consumer, asking for audio even when the live
-	// preview is muted. This does NOT transcode Opus to AAC.
+	// The same audio selection as the validated POC.2. This does not
+	// transcode FLAC/Opus to AAC and does not follow preview mute state.
 	media := mp4.ParseQuery(url.Values{"mp4": {"all"}})
 	consumer := mp4.NewConsumer(media)
 	consumer.FormatName = "mp4"
@@ -278,7 +307,7 @@ func (m *manager) start(w http.ResponseWriter, r *http.Request) {
 	if err := stream.AddConsumer(consumer); err != nil {
 		_ = file.Close()
 		_ = os.Remove(path+".part")
-		reject(w, http.StatusBadGateway, "go2rtc could not connect recording consumer: " + err.Error())
+		reject(w, http.StatusBadGateway, "go2rtc could not connect recording consumer: "+err.Error())
 		return
 	}
 	var videoCodec, audioCodec string
@@ -299,15 +328,18 @@ func (m *manager) start(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 	s := &session{
-		id:id, token:token, source:request.Source, filename:fmt.Sprintf("luxe-poc3-%s-%s.mp4",now.Format("20060102-150405"),id[:8]),
-		path:path, state:"recording", started:now,
-		duration:time.Duration(request.DurationSeconds)*time.Second,
-		audioCodec:audioCodec, videoCodec:videoCodec, stop:make(chan struct{}),
-		stream:stream, consumer:consumer,
+		id: id, token: token, source: request.Source,
+		filename: fmt.Sprintf("luxe-poc3-%s-%s.mp4", now.Format("20060102-150405"), id[:8]),
+		path: path, state: "recording", started: now,
+		duration: time.Duration(request.DurationSeconds) * time.Second,
+		audioCodec: audioCodec, videoCodec: videoCodec, stop: make(chan struct{}),
+		stream: stream, consumer: consumer,
 	}
-	m.activeIDs[request.Source] = id
+	m.mu.Lock()
 	m.sessions[id] = s
+	m.mu.Unlock()
 	go m.record(s, file)
+	reserved = false
 	respond(w, http.StatusAccepted, s.view())
 }
 
