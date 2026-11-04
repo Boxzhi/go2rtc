@@ -13,6 +13,13 @@ import (
 
 func (m *manager) serve(w http.ResponseWriter,r *http.Request) {
 	w.Header().Set("Cache-Control","no-store")
+	// Do not trust a client-supplied header or browser cookie on public 1984.
+	// HA Supervisor has already checked the user's Ingress session before
+	// forwarding the request, including native MP4 Range downloads.
+	if !supervisorIngressRequest(r) {
+		errorResponse(w,http.StatusForbidden,"recording API requires authenticated Home Assistant Ingress")
+		return
+	}
 	at:=strings.LastIndex(r.URL.Path,routePrefix)
 	if at<0 {errorResponse(w,404,"unknown recording endpoint");return}
 	route:=strings.Trim(strings.TrimPrefix(r.URL.Path[at:],routePrefix),"/")
@@ -21,7 +28,6 @@ func (m *manager) serve(w http.ResponseWriter,r *http.Request) {
 		(r.Method==http.MethodGet||r.Method==http.MethodHead) {
 		m.download(w,r,parts[1]);return
 	}
-	if !m.authorized(r) {errorResponse(w,401,"recording access key required");return}
 	switch {
 	case route=="" && r.Method==http.MethodGet:
 		m.list(w,r)
