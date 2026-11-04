@@ -54,6 +54,7 @@ function harness(){
       const req=JSON.parse(options.body);
       const id="id"+(++nextID);
       const value={id,source:req.source,group:req.group,filename:id+".mp4",state:"recording",
+        started_at:new Date(clock).toISOString(),
         bytes:0,duration_seconds:req.duration_seconds,video_codec:"H265",audio_codec:"FLAC"};
       sessions.set(id,value);
       return response(value,202);
