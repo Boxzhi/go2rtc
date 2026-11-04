@@ -62,6 +62,7 @@ type session struct {
 }
 
 type view struct {
+	StartedAt time.Time `json:"started_at"`
 	ID string `json:"id"`
 	Source string `json:"source"`
 	Group string `json:"group,omitempty"`
@@ -79,7 +80,7 @@ type view struct {
 
 func (s *session) view() view {
 	v := view{
-		ID:s.ID, Source:s.Source, Group:s.Group, Filename:s.Filename,
+		StartedAt:s.Started, ID:s.ID, Source:s.Source, Group:s.Group, Filename:s.Filename,
 		State:s.State, Message:s.Message, Bytes:s.Bytes,
 		DurationSeconds:int(s.Duration/time.Second),
 		VideoCodec:s.VideoCodec, AudioCodec:s.AudioCodec,
