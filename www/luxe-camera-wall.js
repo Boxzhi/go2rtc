@@ -1,4 +1,4 @@
-/* 京华府 · 三画面自适应视频墙 v1.1.1 · 视频就绪前禁用交互控制
+/* 京华府 · 三画面自适应视频墙 v1.1.2 · 视频就绪前禁用交互控制
  * - 无重叠矩形拼接；逐项比较总有效视频面积
  * - 尊重视频 videoWidth/videoHeight；object-fit:contain，绝不裁切
  * - 仅通过 absolute 位置/尺寸布局，切换排布不重建播放器
@@ -26,6 +26,7 @@
  * - 使用 go2rtc 原生 MP4 API 录像；每路独立 HTTP 流，服务端 30 分钟上限，结束后直接下载
  * - 录像图标、状态计时、停止及串行下载队列参考 Luxe EZVIZ v1.2.1
  * - v1.0.15：视频加载/重连/暂停时双重隐藏并禁用底部原生与自定义工具，首帧可播放后恢复
+ * - v1.1.2：首帧状态复核、受限播放手动恢复、连续失帧判定及连接阶段诊断
  */
 (() => {
   'use strict';
@@ -625,6 +626,8 @@
       this._tileVisible = [true,true,true];
       this._tileObserver = null;
       this._healthTimers = [null,null,null];
+      this._healthStalls = [0,0,0];
+      this._autoplayAttempts = [null,null,null];
       this._backgroundSuspendTimer = null;
       this._fadeTimers = [null,null,null];
       this._sessionTokens = [0,0,0];
@@ -686,6 +689,8 @@
       this._ratios = config.cameras.map(c => configNumber(c.aspect_ratio, 16/9, 0.2, 6));
       this._knownRatio = new Array(3).fill(false);
       this._playStates = ['idle','idle','idle'];
+      this._healthStalls = [0,0,0];
+      this._autoplayAttempts = [null,null,null];
       this._generation++;
       this._anchorTop = null;
       this._lastArrangement = null;
@@ -878,19 +883,18 @@
       return {frames,currentTime:Number(video.currentTime || 0),readyState:video.readyState,paused:video.paused};
     }
     _scheduleCameraHealthCheck(index,delay=4500) {
-      if (!this._desiredPlaying[index] || !this.isConnected || !this._pageVisible) return;
+      if (!this._desiredPlaying[index] || !this.isConnected || !this._pageVisible ||
+          this._playStates[index]!=='playing') return;
       const camera = this._cards[index];
       const video = this._videos[index] || camera?.video || camera?.shadowRoot?.querySelector('video');
       if (!camera || !video) return;
       clearTimeout(this._healthTimers[index]);
       const token = this._sessionTokens[index];
       const before = this._readVideoProgress(video);
-      if (video.paused && typeof camera.play === 'function') {
-        try { camera.play(); } catch (_) {}
-      }
       this._healthTimers[index] = setTimeout(() => {
         this._healthTimers[index] = null;
         if (!this.isConnected || !this._pageVisible || !this._desiredPlaying[index] ||
+            this._playStates[index]!=='playing' ||
             this._sessionTokens[index] !== token || this._cards[index] !== camera) return;
         const currentVideo = this._videos[index] || camera.video || camera.shadowRoot?.querySelector('video');
         const after = this._readVideoProgress(currentVideo);
@@ -901,8 +905,21 @@
           (before.frames !== null && after.frames !== null && after.frames > before.frames) ||
           after.currentTime > before.currentTime + 0.02
         ));
-        const healthy = !!(after && after.readyState >= 2 && !after.paused && frameAdvanced && !transportFailed);
-        if (!healthy) this._restartCameraAfterHealthFailure(index,'foreground-health-check');
+        const healthy = !!(after && after.readyState >= 2 && !after.paused &&
+          frameAdvanced && !transportFailed);
+        if (healthy) {
+          this._healthStalls[index]=0;
+          return;
+        }
+        // One stalled sample is not enough to tear down a healthy RTC
+        // session: 3K/HEVC frame counters and WebViews may stall briefly.
+        // A failed ICE/PC transport is definitive; restart immediately.
+        if (transportFailed || ++this._healthStalls[index]>=2) {
+          this._restartCameraAfterHealthFailure(index,
+            transportFailed?'rtc-transport-failed':'two-consecutive-stalls');
+        } else {
+          this._scheduleCameraHealthCheck(index,3500);
+        }
       },delay);
     }
     _restartCameraAfterHealthFailure(index,reason) {
@@ -947,6 +964,8 @@
       this._cards = [null,null,null];
       this._videos = [null,null,null];
       this._playStates = ['idle','idle','idle'];
+      this._healthStalls = [0,0,0];
+      this._autoplayAttempts = [null,null,null];
       if (!Array.isArray(this._recordings) || this._recordings.length!==3) this._recordings=[null,null,null];
       this._config.cameras.forEach((c,i) => {
         const tile=document.createElement('div');
@@ -1503,10 +1522,11 @@
           this._handleStartButton(index);
         });
         center.appendChild(play);
-        if (state==='error' || state==='paused') {
+        if (state==='error' || state==='paused' || state==='gesture') {
           const status=document.createElement('div');
           status.className='luxe-start-message';
-          status.textContent=state==='paused' ? '播放已暂停，点击继续' : (message||'连接失败，点击重试');
+          status.textContent=state==='paused' ? '播放已暂停，点击继续' :
+            state==='gesture' ? '浏览器需要点击继续播放' : (message||'连接失败，点击重试');
           center.appendChild(status);
         }
       }
@@ -1515,6 +1535,10 @@
     }
 
     _handleStartButton(index) {
+      if (this._playStates[index] === 'gesture' && this._cards[index]) {
+        this._resumeGesturePlayback(index);
+        return;
+      }
       if (this._playStates[index] === 'paused' && this._cards[index]) {
         this._resumeCamera(index);
         return;
@@ -1554,7 +1578,7 @@
       this._connectTimers[index]=setTimeout(()=>{
         if (this._sessionTokens[index]===token && this._cards[index]===camera &&
             this._playStates[index]==='connecting')
-          this._failCamera(index,'恢复播放超时，点击重试');
+          this._failCamera(index,'恢复播放超时（'+this._connectionStage(index)+'），点击重试');
       },CONNECT_TIMEOUT_MS);
       try {
         // Match AlexxIT's own native .play action. This call remains synchronous
@@ -1579,7 +1603,7 @@
       this._showStartLayer(index,'connecting');
       this._connectTimers[index]=setTimeout(()=>{
         if (this._sessionTokens[index]===token && this._playStates[index]==='connecting')
-          this._failCamera(index,'连接超时，点击重试');
+          this._failCamera(index,'连接超时（'+this._connectionStage(index)+'），点击重试');
       },CONNECT_TIMEOUT_MS);
       try {
         // Some HA startup paths load the WebRTC custom element after this wall.
@@ -1627,11 +1651,13 @@
 
     _cameraReady(index,camera,video,token) {
       if (this._sessionTokens[index]!==token || this._cards[index]!==camera ||
-          this._playStates[index]!=='connecting' || !video || video.paused ||
+          !['connecting','gesture'].includes(this._playStates[index]) || !video || video.paused ||
           video.readyState<2 || !(video.videoWidth>0 && video.videoHeight>0)) return;
       clearTimeout(this._connectTimers[index]);
       this._connectTimers[index]=null;
       this._playStates[index]='playing';
+      this._healthStalls[index]=0;
+      this._autoplayAttempts[index]=null;
       this._syncMediaTools(index);
       const layer=this._wall?.children[index]?.querySelector('.luxe-start-layer');
       if (layer) {
@@ -1660,6 +1686,8 @@
       if (!preserveIntent) this._desiredPlaying[index]=false;
       clearTimeout(this._healthTimers[index]);
       this._healthTimers[index]=null;
+      this._healthStalls[index]=0;
+      this._autoplayAttempts[index]=null;
       clearTimeout(this._fadeTimers[index]);
       this._fadeTimers[index]=null;
       clearTimeout(this._connectTimers[index]);
