@@ -27,6 +27,7 @@ function createHarness() {
       textContent: "",
       value: "",
       href: "",
+      style: {},
       disabled: false,
       children: [],
       listeners: {},
@@ -129,7 +130,6 @@ async function run() {
   await settle();
   h.ready("poc_camera_1");
   h.click("sync"); await settle();
-  if(h.nativeDownloads.length!==1)console.error("FIRST FAILURE LOG:",h.get("log").textContent);
   assert.equal(h.nativeDownloads.length,1,"first ready recording must automatically download");
   h.ready("poc_camera_2"); h.ready("poc_camera_3");
   h.click("sync"); await settle();
