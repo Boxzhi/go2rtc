@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Luxe POC.4 · 三路录像一次分享</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:light dark}
+body{margin:auto;max-width:680px;padding:20px 15px 40px;line-height:1.55}
+h1{font-size:23px;line-height:1.3;margin:0 0 8px}h2{font-size:17px;margin:0 0 12px}
+section{border:1px solid #8f99a766;border-radius:15px;padding:15px;margin:14px 0}
+p,small{color:#85919e}label{display:block;font-weight:650;font-size:14px;margin:8px 0}
+input{box-sizing:border-box;width:100%;font-size:16px;background:transparent;color:inherit;padding:12px;border-radius:10px;border:1px solid #85919e77}
+button{font:650 15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:12px 15px;border:0;border-radius:10px;background:#2368bd;color:white;min-height:44px}
+button:disabled{opacity:.42}button.secondary{background:#6e798a}button.green{background:#087b91}
+button.full{width:100%;margin:8px 0}
+.line{display:flex;align-items:center;justify-content:space-between;gap:10px;border-radius:11px;background:#8293a31c;padding:12px;margin:9px 0}
+.line .main{min-width:0;flex:1}.line .main strong,.line .main small{display:block}.line .state{font-size:12px;white-space:nowrap;color:#477ec3}
+#summary{font-weight:700;margin:14px 0}
+#log{padding:12px;border-radius:9px;background:#8392a822;font:12px/1.55 ui-monospace,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere;max-height:245px;overflow:auto}
+.note{border-left:3px solid #e5a63c;padding:9px;font-size:13px;color:#8692a1}
+#fallback{margin:12px 0 0}#fallback button{display:block;width:100%;margin:7px 0;background:#667789;text-align:left}
+</style>
+</head>
+<body>
+<h1>Luxe POC.4 · 三路录像一次保存</h1>
+<p>已验证的三路 go2rtc 录像机制 + 已验证的 iOS 多文件 Web Share API。只做一次三路 10 秒联合验证，不修改官方 HA App，不打 ZIP。</p>
+<p class="note">三路录制可能相差 1～2 秒完成。程序只依据每份 MP4 的服务端 ready 状态决定何时准备分享；不使用固定延时，也不读取正在写入的 .part 文件。真正保存仍需你在系统分享界面选择“存储到文件”。</p>
+<section>
+<h2>开始三路录像</h2>
+<label for="key">独立测试 App 密钥</label>
+<input type="password" id="key" autocomplete="off" spellcheck="false" placeholder="填写安装 App 时配置的 secret">
+<p>固定测试：客厅移动 / 客厅固定 / 餐厅，分别录制 10 秒。三路独立 MP4 文件，音轨与此前通过实机验收的 POC.3 一致。</p>
+<button id="start" class="full">同时开始三路 10 秒录像</button>
+</section>
+<section>
+<h2>逐路状态与整组完成屏障</h2>
+<div id="cams"></div>
+<div id="summary">尚未开始</div>
+</section>
+<section>
+<h2>一次性分享</h2>
+<p id="shareStatus">等待三路 MP4 全部封装结束后，将自动读取完整文件并准备分享。准备好后，只需点击一次分享按钮。</p>
+<button id="share" class="green full" disabled>一次分享 3 个 MP4</button>
+<p class="note">由于 Web Share API 需要用户点击，不会在 10 秒录像结束时无手势自动弹出分享面板。成功返回分享 API 也不等于已经永久保存，需在 iPhone「文件」App 核对三个文件。</p>
+<div id="fallback"></div>
+</section>
+<section>
+<h2>调试日志</h2>
+<div id="log"></div>
+</section>
+<script>
+(()=>{
+"use strict";
+const $=id=>document.getElementById(id);
+const cams=[
+ {key:"poc_camera_1",title:"客厅移动"},
+ {key:"poc_camera_2",title:"客厅固定"},
+ {key:"poc_camera_3",title:"餐厅"}
+];
+const apiRoot=new URL("./api/luxe/poc3/",location.href);
+const ONE_MIB=1024*1024;
+const PER_FILE_LIMIT=24*ONE_MIB;
+const TOTAL_LIMIT=48*ONE_MIB;
+const MAX_WAIT_MS=90000;
+let running=false,polling=null,pollBusy=false,watchdog=null,startedAt=0,startedCount=0;
+let records=new Map(),problems=new Map(),files=[],shareReady=false,preparing=false,completed=false;
+const log=msg=>{
+ const t=new Date().toLocaleTimeString();
+ $("log").textContent+="["+t+"] "+msg+"\n";
+ $("log").scrollTop=$("log").scrollHeight;
+};
+const setSummary=msg=>{ $("summary").textContent=msg;log(msg); };
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+function headers(json=false){
+ const h={"X-Luxe-POC-Key":$("key").value.trim()};
+ if(json)h["Content-Type"]="application/json";
+ return h;
+}
+async function call(route,options={}){
+ const res=await fetch(new URL(route,apiRoot),{cache:"no-store",...options});
+ const body=await res.json().catch(()=>({error:"invalid response"}));
+ if(!res.ok) throw Error(body.error||"HTTP "+res.status);
+ return body;
+}
+function render(){
+ const root=$("cams");root.replaceChildren();
+ for(const cam of cams){
+  const record=records.get(cam.key),problem=problems.get(cam.key);
+  const row=document.createElement("div");row.className="line";
+  const left=document.createElement("div");left.className="main";
+  const name=document.createElement("strong");name.textContent=cam.title;
+  const description=document.createElement("small");
+  description.textContent=problem?"启动/录制失败："+problem:
+   record?record.state+" · "+(record.bytes/ONE_MIB).toFixed(2)+" MiB · "+(record.video_codec||"待确定")+" / "+(record.audio_codec||"无音轨"):
+   running?"等待录制会话创建":"未开始";
+  const state=document.createElement("span");state.className="state";
+  state.textContent=problem?"failed":record?record.state:"pending";
+  left.append(name,description);row.append(left,state);root.append(row);
+ }
+}
+function clearTimers(){
+ if(polling!==null)clearInterval(polling);
+ if(watchdog!==null)clearTimeout(watchdog);
+ polling=null;watchdog=null;
+}
+function directDownload(rec){
+ const url=new URL(rec.download_url,location.href);
+ if(url.origin!==location.origin)throw Error("下载源不属于 HA 当前页面");
+ const a=document.createElement("a");
+ a.href=url.href;a.download=rec.filename||"recording.mp4";
+ a.style.display="none";document.body.appendChild(a);
+ try{a.click();log("已请求单独下载："+rec.source+"（不记录令牌）");}
+ finally{a.remove();}
+}
+function renderFallback(){
+ const root=$("fallback");root.replaceChildren();
+ const intro=document.createElement("p");
+ intro.textContent="备用方式：如一次分享失败，可按已验证的 WKDownload 流程逐个下载以下已完成文件。";
+ root.append(intro);
+ for(const cam of cams){
+  const rec=records.get(cam.key);
+  if(rec?.state!=="ready"||!rec.download_url)continue;
+  const b=document.createElement("button");
+  b.textContent="单独下载 · "+cam.title+"（"+(rec.bytes/ONE_MIB).toFixed(2)+" MiB）";
+  b.addEventListener("click",()=>{try{directDownload(rec);}catch(err){log("单独下载失败："+String(err));}});
+  root.append(b);
+ }
+}
+async function prepareShare(){
+ if(preparing||shareReady)return;
+ preparing=true;$("share").disabled=true;
+ const ready=cams.map(c=>records.get(c.key));
+ if(ready.some(r=>r?.state!=="ready"||!r.download_url)){
+  setSummary("至少一路未 ready，拒绝分享不完整的三份录像。");
+  renderFallback();preparing=false;return;
+ }
+ const expected=ready.reduce((n,r)=>n+Number(r.bytes),0);
+ if(ready.some(r=>r.bytes<=1024||r.bytes>PER_FILE_LIMIT)||expected>TOTAL_LIMIT){
+  $("shareStatus").textContent="文件超过本次短录像的内存安全门槛（单路 24 MiB，总计 48 MiB）。不强制读取；请使用下面的独立下载。";
+  renderFallback();preparing=false;return;
+ }
+ $("shareStatus").textContent="三路均 ready；正在读取三个已封装的完整 MP4。此时尚未打开分享面板。";
+ log("整组屏障已解除，开始准备 "+(expected/ONE_MIB).toFixed(2)+" MiB 的三个 MP4");
+ try{
+  const next=[];
+  for(let i=0;i<ready.length;i++){
+   const rec=ready[i];
+   const url=new URL(rec.download_url,location.href);
+   if(url.origin!==location.origin)throw Error("拒绝跨源文件");
+   const res=await fetch(url.href,{cache:"no-store"});
+   if(!res.ok)throw Error(cams[i].title+" 获取 MP4 失败：HTTP "+res.status);
+   const length=Number(res.headers.get("content-length"));
+   if(length&&length!==rec.bytes)throw Error(cams[i].title+" Content-Length 与服务端长度不一致");
+   if(length>PER_FILE_LIMIT)throw Error(cams[i].title+" 超过内存门槛");
+   const blob=await res.blob();
+   if(blob.size!==rec.bytes||blob.size<1024)throw Error(cams[i].title+" MP4 字节数不完整");
+   const head=new Uint8Array(await blob.slice(4,8).arrayBuffer());
+   const signature=String.fromCharCode(...head);
+   if(signature!=="ftyp")throw Error(cams[i].title+" MP4 文件头不符合预期："+signature);
+   const f=new File([blob],rec.filename||cams[i].key+".mp4",{type:"video/mp4"});
+   next.push(f);log(cams[i].title+"：已准备完整 MP4，"+(f.size/ONE_MIB).toFixed(2)+" MiB");
+  }
+  if(typeof navigator.share!=="function"||typeof navigator.canShare!=="function"||!navigator.canShare({files:next}))
+   throw Error("HA App 当前 Web Share 不接受这组三个 MP4");
+  files=next;shareReady=true;
+  $("share").disabled=false;
+  $("shareStatus").textContent="三个独立 MP4 已完整准备。请点击一次「分享三个 MP4」，再选择「存储到文件」。";
+  setSummary("三路已全部完成，内容校验通过；可一次分享三个 MP4");
+ }catch(err){
+  files=[];shareReady=false;
+  $("shareStatus").textContent="三文件准备/分享能力检查失败："+String(err)+"。可尝试独立原生下载。";
+  log("三文件准备失败："+String(err));
+  renderFallback();
+ }finally{preparing=false;}
+}
+function finishBarrier(reason){
+ if(completed)return;
+ completed=true;clearTimers();running=false;$("start").disabled=false;
+ render();renderFallback();
+ if(problems.size>0||records.size!==3||cams.some(c=>records.get(c.key)?.state!=="ready")){
+  $("shareStatus").textContent="本轮未能完成三路录制，因此不会把部分文件冒充三路一起分享。可单独下载已 ready 的录像。";
+  setSummary("整组未全部成功（"+reason+"）：成功 "+cams.filter(c=>records.get(c.key)?.state==="ready").length+"/3 路");
+  return;
+ }
+ setSummary("三路录像均已 ready（"+reason+"），开始一次分享准备");
+ void prepareShare();
+}
+async function poll(){
+ if(pollBusy||!running||records.size===0)return;
+ pollBusy=true;
+ try{
+  const entries=[...records.entries()];
+  const result=await Promise.allSettled(entries.map(([_,rec])=>call("status/"+encodeURIComponent(rec.id),{headers:headers()})));
+  for(let i=0;i<entries.length;i++){
+   const key=entries[i][0],outcome=result[i];
+   if(outcome.status==="fulfilled"){
+    const previous=records.get(key);
+    records.set(key,outcome.value);
+    if(previous?.state!==outcome.value.state)log((cams.find(c=>c.key===key)?.title||key)+" → "+outcome.value.state);
+    if(outcome.value.state==="failed")problems.set(key,outcome.value.message||"服务端录制失败");
+   }else log(key+" 状态读取错误："+String(outcome.reason));
+  }
+  render();
+  if([...records.values()].every(r=>r.state==="ready"||r.state==="failed")&&startedCount===3){
+   finishBarrier("三路进入最终状态");
+  }
+ }finally{pollBusy=false;}
+}
+async function start(){
+ if(running||preparing)return;
+ if($("key").value.trim().length<24){setSummary("请填写独立 App 中至少 24 字符的密钥");return;}
+ clearTimers();records=new Map();problems=new Map();files=[];shareReady=false;preparing=false;completed=false;startedCount=0;
+ $("share").disabled=true;$("fallback").replaceChildren();$("shareStatus").textContent="等待服务端录像完成。";
+ $("start").disabled=true;running=true;startedAt=Date.now();render();
+ setSummary("并发请求启动三路 10 秒录像");
+ const outcomes=await Promise.allSettled(cams.map(cam=>call("start",{
+  method:"POST",headers:headers(true),body:JSON.stringify({source:cam.key,duration_seconds:10})
+ })));
+ outcomes.forEach((out,i)=>{
+  const cam=cams[i];startedCount++;
+  if(out.status==="fulfilled"){records.set(cam.key,out.value);log(cam.title+"：会话已建立");}
+  else{problems.set(cam.key,String(out.reason));log(cam.title+"：启动失败："+String(out.reason));}
+ });
+ render();
+ if(!records.size){finishBarrier("三路全部启动失败");return;}
+ watchdog=setTimeout(()=>{
+  log("整组超时保护触发（90 秒）；不再等待未结束的录像");
+  void poll().finally(()=>finishBarrier("超时"));
+ },MAX_WAIT_MS);
+ polling=setInterval(()=>{void poll();},800);
+ void poll();
+}
+$("start").addEventListener("click",()=>void start());
+$("share").addEventListener("click",()=>{
+ if(!shareReady||files.length!==3)return;
+ try{
+  // IMPORTANT: call navigator.share immediately in this trusted click handler.
+  // Do not await fetch or another async task before invoking the share sheet.
+  const result=navigator.share({files:files});
+  log("用户触发系统分享，三份独立 MP4；等待分享面板返回");
+  Promise.resolve(result).then(()=>{
+   $("shareStatus").textContent="分享面板已返回。请到 iPhone「文件」App 确认实际保存了三个独立 MP4。";
+   log("share() 返回；不视为系统永久保存确认");
+  }).catch(err=>{
+   $("shareStatus").textContent="分享被取消或失败："+String(err)+"。文件仍准备好，可再次点击分享。";
+   log("share() 异常："+String(err));
+  });
+ }catch(err){log("调用 share() 失败："+String(err));}
+});
+render();log("POC.4 已加载：一次三路 10 秒录像，等待所有 ready 后一次分享；不修改官方 HA App");
+})();
+</script>
+</body>
+</html>
