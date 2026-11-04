@@ -24,7 +24,7 @@ p,small{color:#84919c}p{margin:10px 0}
 </style>
 </head>
 <body>
-<h1>Luxe · 三路录像事件下载队列</h1>
+<h1>Luxe · 自动续下实验版 v0.4.2</h1>
 <p>谁先录制完成就立即进入原生下载；其余继续录制。即使第一个 WKDownload 弹窗还开着，第二、第三路也只排队、不覆盖弹窗。官方 HA App 不做修改。</p>
 <p class="note">本次验证仅执行一次：三路分别 10、12、14 秒，以制造弹窗重叠场景。进入 iOS 原生下载/保存界面后，请保持弹窗打开，观察其他录像是否完成；返回页面后再继续。网页无法检测原生「保存完成」，所有确认按钮都代表你亲自确认。</p>
 <section>
@@ -42,13 +42,15 @@ p,small{color:#84919c}p{margin:10px 0}
 </section>
 <section>
 <h2>原生下载／合并保存队列</h2>
-<p>第一个文件立即自动进入 WKDownload。此后用户保存并关闭弹窗，再通过下方按钮继续；若剩余两份录像均就绪且足够小，可以一次分享剩余两份。</p>
+<p>第一个文件立即自动进入 WKDownload。尝试捕捉原生下载面板离开/返回信号，自动请求下一份；无法确认关闭时继续保留手动按钮。仅通过失焦→恢复等成对事件触发，不以计时器单独判定。</p>
 <div id="queueState">尚无待下载录像</div>
+<div id="autoStatus" class="note" style="margin:10px 0">自动续下检测：尚未启动下载</div>
 <button id="retry" class="gray" disabled>重试当前文件下载</button>
+<button id="recover" class="gray" disabled>重新下载上一个自动跳过的文件</button>
 <button id="confirm" class="block" disabled>我已保存当前视频，继续下载下一路</button>
 <button id="shareRest" class="teal block" disabled>我已保存当前视频，一次分享剩余两份</button>
 <button id="finishShare" class="teal block" disabled>我已确认剩余文件全部保存</button>
-<div id="moreInfo" class="note" style="margin-top:12px">不会在原生下载弹窗未确认关闭时自动拉起第二个 WKDownload。</div>
+<div id="moreInfo" class="note" style="margin-top:12px">无法读取 iOS 原生保存结果。自动续下只推断弹窗返回，不会把上一份标为已保存；发现漏存请用「重新下载上一个文件」。</div>
 </section>
 <section>
 <h2>调试日志</h2>
@@ -68,10 +70,64 @@ const MiB=1048576;
 const BATCH_FILE_CAP=16*MiB;
 const BATCH_TOTAL_CAP=32*MiB;
 const OVERALL_WATCHDOG_MS=90000;
+// EXPERIMENTAL ONLY: a native SwiftUI sheet has no JS close callback.
+// Require an observed away -> return event pair, then a stable foreground period.
+// These thresholds alone never trigger native downloads.
+const SHEET_MIN_OPEN_MS=1400;
+const RETURN_STABLE_MS=850;
 let recordMap=new Map(),failMap=new Map(),readyQueue=[],seenReady=new Set(),saved=new Set();
 let active=null,batchShare=null,prepared=null,batchPreparing=false;
 let starting=false,pollBusy=false,pollHandle=null,startedAt=0,startResolved=0,groupStarted=false;
 let syncErrorCount=0;
+let sheetEpoch=0,sheetArmedAt=0,sheetWentAway=false,sheetReturnTimer=null;
+let autoAdvanced=0,autoLast=null,autoStatus="尚未启动下载";
+function autoInfo(message){
+ autoStatus=message;
+ $("autoStatus").textContent="自动续下检测："+message;
+ log("原生面板信号："+message);
+}
+function clearResumeTimer(){
+ if(sheetReturnTimer!==null)clearTimeout(sheetReturnTimer);
+ sheetReturnTimer=null;
+}
+function armResume(rec){
+ clearResumeTimer();
+ sheetEpoch++;
+ sheetArmedAt=Date.now();
+ sheetWentAway=false;
+ autoInfo("已请求 "+labelFor(rec)+" 下载；等待原生面板离开/返回信号");
+}
+function signalAway(origin){
+ if(!active||batchShare||sheetWentAway)return;
+ sheetWentAway=true;
+ autoInfo(origin+"：检测到页面失焦/离开，等待返回");
+}
+function signalReturn(origin){
+ if(!active||batchShare||!sheetWentAway)return;
+ if(document.hidden){
+  autoInfo(origin+"：页面仍不可见，继续等待");
+  return;
+ }
+ const epoch=sheetEpoch;
+ clearResumeTimer();
+ autoInfo(origin+"：检测到页面返回，正在稳定确认（不能证明已保存）");
+ const elapsed=Date.now()-sheetArmedAt;
+ const delay=Math.max(RETURN_STABLE_MS,SHEET_MIN_OPEN_MS-elapsed);
+ sheetReturnTimer=setTimeout(()=>{
+  sheetReturnTimer=null;
+  if(epoch!==sheetEpoch||!active||batchShare||!sheetWentAway||document.hidden)return;
+  // No native save callback exists. This records a presumed *closed* sheet,
+  // never a confirmed file save. Current file stays on the test server for retry.
+  const previous=active;
+  active=null;
+  sheetWentAway=false;
+  autoLast=previous;
+  autoAdvanced++;
+  autoInfo("推断 "+labelFor(previous)+" 原生面板已关闭；已自动继续（保存结果未验证）");
+  if(readyQueue.length)maybeStartNext();
+  else showQueue(); // the next ready event can now auto-start its download
+ },delay);
+}
 function log(message){
  $("log").textContent+="["+new Date().toLocaleTimeString()+"] "+message+"\n";
  $("log").scrollTop=$("log").scrollHeight;
@@ -121,12 +177,13 @@ function showQueue(){
   text="剩余 "+batchShare.items.length+" 份已发起系统分享；请先在系统面板保存并关闭。";
  }else if(active){
   text="当前原生下载："+labelFor(active)+
-   "。另有 "+waiting+" 份已完成录像排队。已确认保存 "+complete+" 份。";
+   "。另有 "+waiting+" 份已完成录像排队。用户确认保存 "+complete+" 份，自动推断返回 "+autoAdvanced+" 次。";
  }else if(waiting){
   text="当前无原生下载弹窗，已有 "+waiting+" 份待保存录像。";
- }else text="待保存队列为空；已确认保存 "+complete+" 份。";
+ }else text="待保存队列为空；用户确认保存 "+complete+" 份，自动推断返回 "+autoAdvanced+" 次（不等于已保存）。";
  $("queueState").textContent=text;
  $("retry").disabled=!active||!!batchShare;
+ $("recover").disabled=!!active||!!batchShare||!autoLast;
  $("confirm").disabled=!active||!!batchShare;
  $("shareRest").disabled=!!batchShare||!prepared||readyQueue.length!==prepared.items.length||
   (active===null&&readyQueue.length===0);
@@ -150,10 +207,17 @@ function clickDownload(rec,retry=false){
  const a=document.createElement("a");
  a.href=url.href;a.download=rec.filename;a.style.display="none";
  document.body.appendChild(a);
+ const before=active;
+ active=rec; // Arm before click: native blur may be delivered immediately.
+ armResume(rec);
  try{
   a.click();
-  active=rec;
-  log((retry?"重试":"已请求")+"原生 WKDownload："+labelFor(rec)+"，其余任务不会覆盖此弹窗");
+  log((retry?"重试":"已请求")+"原生 WKDownload："+labelFor(rec)+"；等待失焦→返回信号，其他任务仅入队");
+ }catch(err){
+  active=before;
+  clearResumeTimer();
+  sheetWentAway=false;
+  throw err;
  }finally{a.remove();}
  showQueue();
 }
@@ -246,6 +310,8 @@ async function start(){
  if($("key").value.trim().length<24){summary("请填写至少 24 字符的测试密钥");return;}
  recordMap=new Map();failMap=new Map();readyQueue=[];seenReady=new Set();saved=new Set();
  prepared=null;batchPreparing=false;active=null;batchShare=null;
+ clearResumeTimer();sheetEpoch++;sheetWentAway=false;autoAdvanced=0;autoLast=null;
+ autoInfo("已重置本轮自动续下检测");
  groupStarted=true;starting=true;startResolved=0;syncErrorCount=0;startedAt=Date.now();
  if(pollHandle!==null)clearInterval(pollHandle);
  displayRows();showQueue();
@@ -278,6 +344,9 @@ async function start(){
 }
 function confirmCurrentAndContinue(){
  if(!active)return;
+ clearResumeTimer();
+ sheetEpoch++;
+ sheetWentAway=false;
  saved.add(active.id);
  log("用户声明已保存 "+labelFor(active)+"；此处不是原生 iOS 保存回调");
  active=null;
@@ -294,6 +363,7 @@ function onShare(){
  if(prepared.ids!==readyQueue.slice(0,2).map(r=>r.id).join("|"))return;
  const bundle=prepared;
  if(active){
+  clearResumeTimer(); sheetEpoch++; sheetWentAway=false;
   saved.add(active.id);
   log("用户确认前一份已保存，即将一次分享其余两份");
   active=null;
@@ -339,15 +409,35 @@ $("retry").addEventListener("click",()=>{
  if(active){try{clickDownload(active,true);}catch(err){log("重试失败："+String(err));}}
 });
 $("confirm").addEventListener("click",confirmCurrentAndContinue);
+$("recover").addEventListener("click",()=>{
+ if(!active&&!batchShare&&autoLast){
+  const rec=autoLast;
+  autoLast=null;
+  try{clickDownload(rec,true);}catch(err){autoLast=rec;log("重新下载上一份失败："+String(err));}
+  showQueue();
+ }
+});
 $("shareRest").addEventListener("click",onShare);
 $("finishShare").addEventListener("click",confirmShare);
 document.addEventListener("visibilitychange",()=>{
- if(!document.hidden){log("页面恢复可见，重新同步录像完成状态");void sync();}
+ if(document.hidden)signalAway("visibilitychange:hidden");
+ else{
+  signalReturn("visibilitychange:visible");
+  if(groupStarted)void sync();
+ }
 });
-window.addEventListener("pageshow",()=>{if(groupStarted)void sync();});
-window.addEventListener("focus",()=>{if(groupStarted)void sync();});
+window.addEventListener("blur",()=>signalAway("window.blur"));
+window.addEventListener("pagehide",()=>signalAway("pagehide"));
+window.addEventListener("pageshow",()=>{
+ signalReturn("pageshow");
+ if(groupStarted)void sync();
+});
+window.addEventListener("focus",()=>{
+ signalReturn("window.focus");
+ if(groupStarted)void sync();
+});
 displayRows();showQueue();
-log("混合下载队列 POC 已加载：ready 事件优先，原生 Sheet 单实例；从不自动覆盖弹窗");
+log("v0.4.2 自动续下实验版已加载：仅在失焦→返回配对信号后自动尝试下一路；不检测实际保存");
 })();
 </script>
 </body>
