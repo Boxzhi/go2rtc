@@ -124,7 +124,7 @@ function signalReturn(origin){
   autoLast=previous;
   autoAdvanced++;
   autoInfo("推断 "+labelFor(previous)+" 原生面板已关闭；已自动继续（保存结果未验证）");
-  if(readyQueue.length)maybeStartNext();
+  if(readyQueue.length)maybeStartNext(true);
   else showQueue(); // the next ready event can now auto-start its download
  },delay);
 }
@@ -221,13 +221,13 @@ function clickDownload(rec,retry=false){
  }finally{a.remove();}
  showQueue();
 }
-function maybeStartNext(){
+function maybeStartNext(forceNative=false){
  // Strictly at most one native download at a time. An open share sheet also
  // blocks the native download slot. The first ready file is automatic.
  if(active||batchShare||!readyQueue.length)return;
  // If two already wait and have been preloaded as one share set, leave the
  // combined-share option available; never initiate a second WKDownload by timer.
- if(readyQueue.length>=2&&prepared)return;
+ if(readyQueue.length>=2&&prepared&&!forceNative)return;
  const rec=readyQueue.shift();
  try{clickDownload(rec);}catch(err){readyQueue.unshift(rec);log("启动下载失败："+String(err));}
  showQueue();
