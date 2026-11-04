@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Luxe Xiaomi Camera · Recording RC</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:light dark}
+body{max-width:760px;margin:auto;padding:17px 15px 40px;line-height:1.55}
+h1{font-size:23px;margin:4px 0 8px}h2{font-size:17px;margin:0 0 12px}
+section{border:1px solid #8293a354;border-radius:15px;padding:15px;margin:14px 0}
+p,small{color:#85929e}label{display:block;font-weight:600;font-size:14px;margin:12px 0 6px}
+input,select{width:100%;box-sizing:border-box;padding:11px;background:transparent;color:inherit;border:1px solid #8393a381;border-radius:10px;font-size:16px}
+button{border:0;border-radius:9px;background:#2668b7;color:#fff;padding:11px 12px;min-height:43px;font-size:14px;font-weight:650;margin:6px 4px 0 0}
+button[disabled]{opacity:.4}button.secondary{background:#66778b}button.success{background:#087b8b}button.warn{background:#956837}
+.row{display:flex;gap:10px;align-items:center;justify-content:space-between;margin:10px 0;padding:13px;background:#8090a21c;border-radius:12px}
+.row .camera{flex:1;min-width:0}.camera strong,.camera small{display:block}.camera small{font-size:12px;overflow-wrap:anywhere}
+.row .actions{text-align:right;max-width:50%}
+.badge{font-size:12px;color:#628dca}
+#feedback{font-weight:700}
+#logs{max-height:230px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#8090a21a;border-radius:10px;padding:12px;font:12px/1.5 ui-monospace,Menlo,monospace}
+.note{padding:10px;border-left:3px solid #dfa73d;font-size:13px}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<h1>Luxe Xiaomi Camera · 录像 RC</h1>
+<p>基于正式 HLC7 代码的隔离测试 App。三路最多同时录制 30 分钟；每路完成后独立保留 15 分钟，过期撤销下载并清理临时 MP4。</p>
+<p class="note">这是录制功能的集成测试界面，不替换当前的 luxe-camera-wall 控件。官方 Home Assistant iOS App 不会把原生下载弹窗关闭或保存成功反馈给网页；因此只有明确点击“确认已保存”后才删除缓存。</p>
+<section>
+<h2>录像设置</h2>
+<label for="secret">独立测试密钥</label>
+<input id="secret" type="password" autocomplete="off" spellcheck="false" placeholder="填写 Test App 配置的 secret">
+<label for="duration">录制时长</label>
+<select id="duration">
+<option value="10" selected>10 秒（首次回归验证）</option>
+<option value="60">1 分钟</option>
+<option value="300">5 分钟</option>
+<option value="1800">30 分钟（上限，磁盘保护会生效）</option>
+</select>
+<div>
+<button id="startAll">同时开始三路录像</button>
+<button id="refresh" class="secondary">刷新/恢复待保存录像</button>
+</div>
+</section>
+<section>
+<h2>每路录像与保存状态</h2>
+<div id="cameras"></div>
+<div id="feedback">正在连接…</div>
+</section>
+<section>
+<h2>批量保存</h2>
+<p>多路录制在最早完成后约 2 秒内全部就绪：优先准备一次多文件分享。否则先完成的启动原生下载，其余在对应摄像头显示「保存」。分享受 WebView 内存限制，大文件自动使用逐个下载。</p>
+<button id="batch" class="success" disabled>准备一次分享</button>
+<small id="batchInfo">等待多路录像</small>
+</section>
+<section>
+<h2>日志</h2>
+<div id="logs"></div>
+</section>
+<script>
+(()=>{
+"use strict";
+const $=id=>document.getElementById(id);
+const cams=[
+  {name:"jinghuafu_keting_ptz_3k",label:"客厅移动"},
+  {name:"jinghuafu_keting_fixed_3k",label:"客厅固定"},
+  {name:"jinghuafu_canting_2k",label:"餐厅"}
+];
+const api=new URL("./api/luxe/recordings/",location.href);
+const SHARE_FILE_CAP=16*1048576,SHARE_TOTAL_CAP=32*1048576;
+let currentGroup="",map=new Map(),activeNative=null,autoNativeIssued=false;
+let firstObservedReady=0,coalesceTimer=null,pollBusy=false,shareFiles=null,shareIDs="";
+let batchFetching=false,pendingConfirm=new Set(),previousReady=new Set(),refreshing=false;
+const log=s=>{$("logs").textContent+="["+new Date().toLocaleTimeString()+"] "+s+"\n";$("logs").scrollTop=$("logs").scrollHeight;};
+const feedback=s=>{$("feedback").textContent=s;log(s);};
+function auth(json=false){
+  const key=$("secret").value.trim();
+  const headers={"X-Luxe-Record-Key":key};
+  if(json) headers["Content-Type"]="application/json";
+  return headers;
+}
+async function call(path,init={}){
+  const response=await fetch(new URL(path,api),{cache:"no-store",...init});
+  if(response.status===204)return null;
+  const value=await response.json().catch(()=>({error:"无效 JSON 响应"}));
+  if(!response.ok)throw Error(value.error||"HTTP "+response.status);
+  return value;
+}
+function entries(){return cams.map(c=>({cam:c,session:map.get(c.name)}));}
+function readySessions(){return entries().map(x=>x.session).filter(s=>s?.state==="ready");}
+function hasUnfinished(){return entries().some(({session})=>session&&["recording","stopping","finalizing"].includes(session.state));}
+function timeLeft(s){
+  const seconds=Math.max(0,Math.ceil((Date.parse(s.expires_at)-Date.now())/1000));
+  return String(Math.floor(seconds/60)).padStart(2,"0")+":"+String(seconds%60).padStart(2,"0");
+}
+function mayShare(sessions){
+  if(sessions.length<2)return false;
+  const sizes=sessions.map(s=>Number(s.bytes));
+  return sizes.every(n=>n>=1024&&n<=SHARE_FILE_CAP)&&sizes.reduce((a,b)=>a+b,0)<=SHARE_TOTAL_CAP;
+}
+function draw(){
+  const root=$("cameras");root.replaceChildren();
+  for(const {cam,session:s} of entries()){
+    const row=document.createElement("div");row.className="row";
+    const info=document.createElement("div");info.className="camera";
+    const name=document.createElement("strong");name.textContent=cam.label;
+    const description=document.createElement("small");
+    description.textContent=s?
+      (s.state==="ready"?"文件 "+(s.bytes/1048576).toFixed(2)+" MiB · 过期倒计时 "+timeLeft(s):
+       s.state+" · "+s.video_codec+(s.audio_codec?"/"+s.audio_codec:"")):"可开始录制";
+    info.append(name,description);
+    const box=document.createElement("div");box.className="actions";
+    const btn=document.createElement("button");
+    if(!s||s.state==="failed"){
+      btn.textContent="录制";btn.addEventListener("click",()=>void startOne(cam));
+    }else if(s.state==="recording"){
+      btn.textContent="REC · 停止";btn.className="warn";
+      btn.addEventListener("click",()=>void stopOne(s));
+    }else if(s.state==="ready"){
+      btn.textContent=pendingConfirm.has(s.id)?"重新下载":"保存";
+      btn.className="success";
+      btn.addEventListener("click",()=>nativeSave(s));
+    }else{
+      btn.textContent=s.state==="stopping"?"正在停止":"正在封装";
+      btn.disabled=true;
+    }
+    box.append(btn);
+    if(s?.state==="ready"){
+      const confirmed=document.createElement("button");
+      confirmed.className="secondary";
+      confirmed.textContent="确认已保存";
+      confirmed.addEventListener("click",()=>void ack(s,"saved"));
+      box.append(confirmed);
+      const discard=document.createElement("button");
+      discard.className="warn";discard.textContent="放弃";
+      discard.addEventListener("click",()=>void ack(s,"discard"));
+      box.append(discard);
+    }
+    row.append(info,box);root.append(row);
+  }
+  $("startAll").disabled=hasUnfinished()||entries().some(({session})=>session?.state==="ready");
+  updateShareButton();
+}
+function updateShareButton(){
+  const ready=readySessions();
+  const eligible=ready.filter(s=>s.group===currentGroup);
+  const options=eligible.length>=2?eligible:ready;
+  const signature=options.map(s=>s.id).join("|");
+  if(shareIDs!==signature){shareFiles=null;shareIDs=signature;}
+  $("batch").disabled=!mayShare(options)||batchFetching;
+  $("batch").textContent=shareFiles?"一次分享 "+options.length+" 个 MP4":"准备分享 "+options.length+" 个 MP4";
+  $("batchInfo").textContent=!options.length?"等待 MP4 完成":
+    mayShare(options)?(batchFetching?"正在读取完整 MP4…":"可批量分享（手动点击）"):
+    "部分视频较大，建议通过各自的「保存」按钮使用原生 WKDownload";
+}
+function nativeSave(s){
+  if(!s?.download_url||Date.now()>=Date.parse(s.expires_at)){feedback("录像已过期，不能再下载");void reload();return;}
+  const url=new URL(s.download_url,location.href);
+  if(url.origin!==location.origin){feedback("拒绝跨源 MP4 链接");return;}
+  const a=document.createElement("a");
+  a.href=url.href;a.download=s.filename;a.style.display="none";document.body.appendChild(a);
+  try{
+    a.click();
+    activeNative=s.id;
+    pendingConfirm.add(s.id);
+    log("已请求原生下载："+s.source+"；关闭弹窗不会视为保存成功");
+  }catch(e){feedback("无法启动原生下载："+String(e));}
+  finally{a.remove();draw();}
+}
+function groupReadyAll(ready){
+  return currentGroup!==""&&ready.length===cams.length &&
+    ready.every(s=>s.group===currentGroup);
+}
+function onNewReady(added){
+  if(autoNativeIssued||!currentGroup||!added.length)return;
+  const ready=readySessions().filter(s=>s.group===currentGroup);
+  if(!ready.length)return;
+  if(!firstObservedReady)firstObservedReady=Date.now();
+  if(groupReadyAll(ready)){
+    // All ready within the 2 s coalescing window: enable single user gesture share.
+    if(Date.now()-firstObservedReady<=2000&&mayShare(ready)){
+      autoNativeIssued=true;
+      log("三路于合并窗口内就绪：优先一次分享，等待用户点击");
+      updateShareButton();
+      return;
+    }
+  }
+  if(coalesceTimer!==null)return;
+  coalesceTimer=setTimeout(()=>{
+    coalesceTimer=null;
+    if(autoNativeIssued)return;
+    const candidates=readySessions().filter(s=>s.group===currentGroup);
+    if(!candidates.length)return;
+    const ordered=[...candidates].sort((a,b)=>Date.parse(a.ready_at)-Date.parse(b.ready_at));
+    if(groupReadyAll(ordered)&&mayShare(ordered)&&Date.now()-firstObservedReady<=2600){
+      autoNativeIssued=true;
+      log("三路接近同时完成，改为一次分享，不弹出单份下载窗口");
+      return;
+    }
+    autoNativeIssued=true;
+    nativeSave(ordered[0]);
+  },2000);
+}
+async function reload(recover=false){
+  if(refreshing||$("secret").value.trim().length<24)return;
+  refreshing=true;
+  try{
+    const result=await call("",{headers:auth()});
+    const latest=new Map();
+    for(const s of result.sessions||[]){
+      if(!cams.some(c=>c.name===s.source))continue;
+      const existing=latest.get(s.source);
+      if(!existing||s.id>existing.id)latest.set(s.source,s);
+    }
+    const added=[];
+    for(const s of latest.values()){
+      if(s.state==="ready"&&!previousReady.has(s.id))added.push(s);
+    }
+    map=latest;
+    for(const s of latest.values())if(s.state==="ready")previousReady.add(s.id);
+    if(recover){
+      // Reload must NOT launch old downloads: an earlier native sheet might
+      // still be visible, and no native completion callback exists.
+      autoNativeIssued=true;
+      currentGroup=latest.values().next().value?.group||"";
+      log("服务端恢复 "+latest.size+" 路会话；旧的 ready 文件仅显示保存按钮，不自动弹窗");
+    }else if(added.length)onNewReady(added);
+    draw();
+  }catch(e){feedback("状态同步失败："+String(e));}
+  finally{refreshing=false;}
+}
+async function startOne(cam,groupId=""){
+  try{
+    const result=await call("start",{method:"POST",headers:auth(true),body:JSON.stringify({
+      source:cam.name,group:groupId,duration_seconds:Number($("duration").value)
+    })});
+    map.set(cam.name,result);
+    log(cam.label+" 录像已启动");
+    draw();
+  }catch(e){feedback(cam.label+" 启动失败："+String(e));}
+}
+async function startAll(){
+  if($("secret").value.trim().length<24){feedback("请填写至少 24 字符的测试密钥");return;}
+  currentGroup="g_"+Date.now().toString(36);
+  autoNativeIssued=false;firstObservedReady=0;previousReady.clear();
+  if(coalesceTimer!==null){clearTimeout(coalesceTimer);coalesceTimer=null;}
+  feedback("三路录像正在并发启动");
+  await Promise.allSettled(cams.map(c=>startOne(c,currentGroup)));
+}
+async function stopOne(s){
+  try{await call("stop/"+encodeURIComponent(s.id),{method:"POST",headers:auth(true)});
+    log(s.source+" 正在封装");await reload();
+  }catch(e){feedback("停止失败："+String(e));}
+}
+async function ack(s,action){
+  if(action==="saved"&&!confirm("确认已将该 MP4 保存到当前设备？取消保存时不要确认。"))return;
+  if(action==="discard"&&!confirm("放弃此录像？临时文件将立即删除且不可恢复。"))return;
+  try{
+    await call("ack/"+encodeURIComponent(s.id),{
+      method:"POST",headers:auth(true),body:JSON.stringify({action})
+    });
+    pendingConfirm.delete(s.id);
+    previousReady.delete(s.id);
+    if(activeNative===s.id)activeNative=null;
+    map.delete(s.source);
+    log(s.source+" 用户确认 "+action+"；对应按钮恢复为「录制」");
+    draw();
+  }catch(e){feedback("清理录像失败："+String(e));}
+}
+async function share(){
+  const ready=readySessions();
+  const group=ready.filter(s=>s.group===currentGroup);
+  const fileset=group.length>=2?group:ready;
+  if(!mayShare(fileset)){feedback("录像太大，不能安全批量加载；请逐个原生下载");return;}
+  const id=fileset.map(s=>s.id).join("|");
+  if(!shareFiles||shareIDs!==id){
+    batchFetching=true;updateShareButton();
+    try{
+      const f=[];
+      for(const s of fileset){
+        const u=new URL(s.download_url,location.href);
+        if(u.origin!==location.origin)throw Error("文件地址非同源");
+        const res=await fetch(u.href,{cache:"no-store"});
+        if(!res.ok)throw Error(s.source+" HTTP "+res.status);
+        const blob=await res.blob();
+        if(blob.size!==s.bytes)throw Error(s.source+" 文件长度校验失败");
+        const head=new Uint8Array(await blob.slice(4,8).arrayBuffer());
+        if(String.fromCharCode(...head)!=="ftyp")throw Error(s.source+" MP4 头校验失败");
+        f.push(new File([blob],s.filename,{type:"video/mp4"}));
+      }
+      if(!navigator.canShare?.({files:f})||!navigator.share)throw Error("当前 HA App 不支持这些文件批量分享");
+      if(readySessions().some(s=>Date.now()>=Date.parse(s.expires_at)))throw Error("有录像已到期");
+      shareFiles=f;shareIDs=id;
+      log("已经准备 "+f.length+" 个 MP4；请再次点击「一次分享」");
+    }catch(e){shareFiles=null;feedback("准备分享失败："+String(e));}
+    finally{batchFetching=false;updateShareButton();}
+    return;
+  }
+  // Must call navigator.share in the original user button gesture.
+  try{
+    const promise=navigator.share({files:shareFiles});
+    Promise.resolve(promise).then(()=>log("系统分享面板返回；仍需用户确认已保存"),e=>log("分享取消/失败："+String(e)));
+  }catch(e){feedback("无法调用系统分享："+String(e));}
+}
+$("startAll").addEventListener("click",()=>void startAll());
+$("refresh").addEventListener("click",()=>void reload(true));
+$("batch").addEventListener("click",()=>void share());
+$("secret").addEventListener("change",()=>void reload(true));
+window.addEventListener("pageshow",()=>void reload(true));
+document.addEventListener("visibilitychange",()=>{if(!document.hidden)void reload(true)});
+setInterval(()=>{if(!$("secret").value.trim())return;void reload();},1500);
+setInterval(draw,1000);draw();
+log("Recorder RC 页面已加载，录像缓存独立计时 15 分钟");
+})();
+</script>
+</body></html>
