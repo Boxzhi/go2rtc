@@ -91,8 +91,11 @@ async function request(route,options={}){
 function labelFor(rec){return cameras.find(c=>c.key===rec.source)?.label||rec.source;}
 function allStartsResolved(){return startResolved===cameras.length;}
 function allSessionsTerminal(){
- return allStartsResolved()&&recordMap.size+failMap.size===cameras.length&&
-  [...recordMap.values()].every(r=>r.state==="ready"||r.state==="failed");
+ return allStartsResolved()&&cameras.every(cam=>{
+  if(failMap.has(cam.key))return true;
+  const rec=recordMap.get(cam.key);
+  return rec&&(rec.state==="ready"||rec.state==="failed");
+ });
 }
 function displayRows(){
  const box=$("rows");box.replaceChildren();
