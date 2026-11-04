@@ -58,8 +58,13 @@ jobs:
           app:
             modules:
               - api
+              - luxe_recording
           api:
             listen: "127.0.0.1:1984"
+          luxe_recording:
+            enabled: true
+            secret: "ci-only-test-key-32-characters-ABC"
+            directory: "/tmp/luxe-rc-smoke-cache"
           EOF
           ./dist/go2rtc-luxe-recording-rc-amd64 -c /tmp/recording-rc-smoke.yaml >/tmp/recorder-smoke.log 2>&1 &
           pid=$!
@@ -74,6 +79,17 @@ jobs:
           done
           if [ "$ready" -ne 1 ]; then cat /tmp/recorder-smoke.log;exit 1;fi
           grep -Fq 'Luxe Xiaomi Camera' /tmp/luxe-rc.html
+          code="$(curl --silent -o /dev/null -w '%{http_code}' http://127.0.0.1:1984/api/luxe/recordings/)"
+          test "$code" = 401
+          curl --silent --show-error --fail -H "X-Luxe-Record-Key: ci-only-test-key-32-characters-ABC" \
+            http://127.0.0.1:1984/api/luxe/recordings/ -o /tmp/recorder-list.json
+          python3 - <<'PY'
+          import json
+          with open("/tmp/recorder-list.json") as f: data=json.load(f)
+          assert data["retention_seconds"] == 900, data
+          assert data["max_duration_seconds"] == 1800, data
+          assert data["sessions"] == [], data
+          PY
       - name: Assemble isolated HAOS local test app
         run: |
           set -eu
