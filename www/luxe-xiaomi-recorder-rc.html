@@ -281,7 +281,7 @@ async function ack(s,action){
   }catch(e){feedback("清理录像失败："+String(e));}
 }
 async function prepareBatch(){
-  const ready=readySessions();
+  const ready=readySessions().filter(s=>!pendingConfirm.has(s.id));
   const group=ready.filter(s=>s.group===currentGroup);
   const fileset=group.length>=2?group:ready;
   if(!mayShare(fileset)||batchFetching)return;
@@ -313,7 +313,7 @@ async function prepareBatch(){
   finally{batchFetching=false;updateShareButton();}
 }
 function share(){
-  const ready=readySessions();
+  const ready=readySessions().filter(s=>!pendingConfirm.has(s.id));
   const group=ready.filter(s=>s.group===currentGroup);
   const fileset=group.length>=2?group:ready;
   const id=fileset.map(s=>s.id).join("|");
