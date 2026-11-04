@@ -34,6 +34,7 @@ class El{
   append(...a){this.children.push(...a)}
   appendChild(x){this.children.push(x)}
   setAttribute(){}
+  querySelector(){return null}
   getBoundingClientRect(){return {height:100,top:0,bottom:100}}
 }
 class Video extends El {
