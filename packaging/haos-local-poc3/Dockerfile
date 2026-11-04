@@ -2,7 +2,7 @@ FROM ghcr.io/home-assistant/base:3.24
 
 ARG BUILD_VERSION
 LABEL \
-  io.hass.version="0.3.0" \
+  io.hass.version="0.3.1" \
   io.hass.type="app" \
   io.hass.arch="amd64"
 
