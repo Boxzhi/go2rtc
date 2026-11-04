@@ -82,7 +82,12 @@
       }
       setConfig(config){
         super.setConfig(config);
-        this._rcAddonSlug=String(config.recording_addon_slug||'luxe_xiaomi_record_rc');
+        // HAOS local Add-ons are exposed to Supervisor with a "local_" prefix.
+        // Accept the old short config for backward compatibility; use the
+        // actual full Supervisor slug when requesting /addons/<slug>/info.
+        const configuredSlug=String(config.recording_addon_slug||'local_luxe_xiaomi_record_rc').trim();
+        this._rcAddonSlug=configuredSlug==='luxe_xiaomi_record_rc'
+          ?'local_luxe_xiaomi_record_rc':configuredSlug;
         if(this.isConnected)this._rcSetup();
       }
       connectedCallback(){
