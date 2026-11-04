@@ -234,6 +234,19 @@ async function reload(recover=false){
     }else if(added.length)onNewReady(added);
     if(autoNativeIssued)void prepareBatch();
     draw();
+    const vals=[...latest.values()];
+    const running=vals.filter(s=>["recording","stopping","finalizing"].includes(s.state)).length;
+    const readyCount=vals.filter(s=>s.state==="ready").length;
+    const failures=vals.filter(s=>s.state==="failed").length;
+    const message=running>0?
+      (running+" 路正在录制/封装 · "+readyCount+" 路已完成"):
+      readyCount>0?("本轮录像已完成 · "+readyCount+" 份等待保存"):
+      failures>0?("本轮录像存在 "+failures+" 路失败，请检查状态"):
+      currentGroup?"本轮录像已全部处理，按钮恢复为「录制」":"尚无录像会话";
+    if($("feedback").textContent!==message){
+      $("feedback").textContent=message;
+      log("状态汇总："+message);
+    }
   }catch(e){feedback("状态同步失败："+String(e));}
   finally{refreshing=false;}
 }
