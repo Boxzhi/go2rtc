@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/AlexxIT/go2rtc/internal/api"
@@ -28,10 +29,12 @@ import (
 )
 
 const (
-	routePrefix = "/api/luxe/poc3/"
-	maxDuration = 30 * time.Second // POC.3 short-run gate. 30 minutes requires further validation.
+	routePrefix = "/api/luxe/poc4/"
+	maxDuration = 5 * time.Minute // POC.4: 1/5 min stress only; 30-minute recording not enabled.
 	maxBytes = 256 << 20
-	retention = 30 * time.Minute
+	retention = 60 * time.Minute
+	minDiskReserve = 512 << 20 // minimum free space after conservatively reserving active recordings
+	maxTotalBudget = 1024 << 20 // combined actual retained media and theoretical active recordings
 	maxCompleted = 6
 	maxActive = 3
 )
@@ -111,9 +114,9 @@ func Init() {
 		sessions: make(map[string]*session),
 		activeIDs: make(map[string]string),
 	}
-	api.HandleFunc("api/luxe/poc3/", m.handle)
+	api.HandleFunc("api/luxe/poc4/", m.handle)
 	go m.janitor()
-	log.Warn().Str("temp_dir", dir).Msg("POC.3 enabled: three simultaneous named streams, 30 seconds maximum each, 256 MiB each")
+	log.Warn().Str("temp_dir", dir).Msg("POC.4 stress enabled: three streams, maximum 5 minutes each, 256 MiB each, bounded disk reservations")
 }
 
 func newID() (string, error) {
@@ -144,7 +147,7 @@ func (m *manager) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	at := strings.LastIndex(r.URL.Path, routePrefix)
 	if at < 0 {
-		reject(w, http.StatusNotFound, "unknown POC.2 route")
+		reject(w, http.StatusNotFound, "unknown POC.4 route")
 		return
 	}
 	route := strings.Trim(strings.TrimPrefix(r.URL.Path[at:], routePrefix), "/")
@@ -169,7 +172,7 @@ func (m *manager) handle(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 2 && parts[0] == "stop" && r.Method == http.MethodPost:
 		m.stop(w, parts[1])
 	default:
-		reject(w, http.StatusNotFound, "unknown POC.2 route")
+		reject(w, http.StatusNotFound, "unknown POC.4 route")
 	}
 }
 
@@ -184,7 +187,7 @@ func (s *session) view() sessionView {
 		v.FinishedAt = &finished
 	}
 	if s.state == "ready" {
-		v.DownloadURL = "api/luxe/poc3/download/" + url.PathEscape(s.id) + "?token=" + url.QueryEscape(s.token)
+		v.DownloadURL = "api/luxe/poc4/download/" + url.PathEscape(s.id) + "?token=" + url.QueryEscape(s.token)
 	}
 	return v
 }
@@ -223,10 +226,10 @@ func (m *manager) start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if request.DurationSeconds == 0 {
-		request.DurationSeconds = 10
+		request.DurationSeconds = 60
 	}
-	if request.DurationSeconds < 3 || request.DurationSeconds > 30 {
-		reject(w, http.StatusBadRequest, "POC.3 duration must be 3–30 seconds")
+	if request.DurationSeconds != 60 && request.DurationSeconds != 300 && request.DurationSeconds != 10 && request.DurationSeconds != 30 {
+		reject(w, http.StatusBadRequest, "POC.4 allowed durations: 10, 30, 60, or 300 seconds")
 		return
 	}
 	if request.Source == "" || len(request.Source) > 128 || strings.ContainsAny(request.Source, " \t\r\n") {
@@ -273,6 +276,32 @@ func (m *manager) start(w http.ResponseWriter, r *http.Request) {
 	if completed >= maxCompleted {
 		m.mu.Unlock()
 		reject(w, http.StatusInsufficientStorage, "too many completed POC files: allow cleanup before recording more")
+		return
+	}
+	// Reserve maximum permitted disk usage for each concurrent, not-yet-finished
+	// capture. This is deliberately conservative and fail-closed for HAOS.
+	var disk syscall.Statfs_t
+	if err := syscall.Statfs(m.dir, &disk); err != nil {
+		m.mu.Unlock()
+		reject(w, http.StatusInsufficientStorage, "cannot measure free temporary disk space")
+		return
+	}
+	reserved := int64(len(m.activeIDs)+1) * maxBytes
+	committed := int64(0)
+	for _, existing := range m.sessions {
+		if existing.state == "ready" {
+			committed += existing.bytes
+		}
+	}
+	if committed+reserved > maxTotalBudget {
+		m.mu.Unlock()
+		reject(w, http.StatusInsufficientStorage, "POC.4 total temporary media budget exceeded; wait for expiry")
+		return
+	}
+	free := uint64(disk.Bavail)*uint64(disk.Bsize)
+	if free < uint64(reserved+minDiskReserve) {
+		m.mu.Unlock()
+		reject(w, http.StatusInsufficientStorage, "insufficient free temporary disk space for concurrent capture reservations")
 		return
 	}
 	m.activeIDs[request.Source] = id
@@ -329,7 +358,7 @@ func (m *manager) start(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	s := &session{
 		id: id, token: token, source: request.Source,
-		filename: fmt.Sprintf("luxe-poc3-%s-%s.mp4", now.Format("20060102-150405"), id[:8]),
+		filename: fmt.Sprintf("luxe-poc4-%s-%s.mp4", now.Format("20060102-150405"), id[:8]),
 		path: path, state: "recording", started: now,
 		duration: time.Duration(request.DurationSeconds) * time.Second,
 		audioCodec: audioCodec, videoCodec: videoCodec, stop: make(chan struct{}),
@@ -382,6 +411,14 @@ func (m *manager) record(s *session, file *os.File) {
 	if err := file.Sync(); writeErr == nil { writeErr = err }
 	if err := file.Close(); writeErr == nil { writeErr = err }
 	size := writer.n
+	// A connection ending early must not be counted as a complete 1/5 minute
+	// recording. Manual stops are intentionally excluded from this check.
+	m.mu.Lock()
+	manualStop := s.state == "stopping"
+	m.mu.Unlock()
+	if writeErr == nil && !manualStop && time.Since(s.started)+3*time.Second < s.duration {
+		writeErr = fmt.Errorf("stream ended before requested duration of %v; MP4 rejected", s.duration)
+	}
 	if writeErr == nil && size < 1024 {
 		writeErr = errors.New("recording contains no usable media")
 	}
@@ -463,4 +500,4 @@ func (m *manager) download(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 // Do not use as a production recording subsystem.
-// This POC is deliberately short-lived, up to three streams and test-only.
+// This POC is a guarded long-record stress gate; not a production recording service.
