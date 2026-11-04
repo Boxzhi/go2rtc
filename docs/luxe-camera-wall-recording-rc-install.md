@@ -1,4 +1,4 @@
-# Luxe Xiaomi Camera Recording RC3 — test integration installation
+# Luxe Xiaomi Camera Recording RC4 — test integration installation
 
 **Test only.** This candidate is based on production branch `luxe/hlc7` but does not replace the working production go2rtc or original `luxe-camera-wall.js`.
 
@@ -20,7 +20,7 @@ tar -xzf /config/www/luxe-xiaomi-recording-rc-local-app-amd64.tar.gz -C /addons/
 ls -l /addons/local/luxe_xiaomi_record_rc/
 ```
 
-Refresh Home Assistant Apps. Install/upgrade **Luxe Xiaomi Camera Recording RC** to `1.9.15-luxe.record-rc3`. Keep the three existing RTSP restream source defaults. Keep or enter the existing dedicated test secret (24+ characters). Start RC App. Production go2rtc is not modified.
+Refresh Home Assistant Apps. Install/upgrade **Luxe Xiaomi Camera Recording RC** to `1.9.15-luxe.record-rc4`. Keep the three existing RTSP restream source defaults. Keep or enter the existing dedicated test secret (24+ characters). Start RC App. Production go2rtc is not modified.
 
 ## 2. Add the new camera-wall test resource
 
@@ -29,7 +29,7 @@ Upload the artifact's `luxe-camera-wall-recording-rc.js` to `/config/www/`.
 Settings > Dashboards > Resources: ensure the **original** `luxe-camera-wall.js` resource remains loaded. Add this second JS module:
 
 ```yaml
-url: /local/luxe-camera-wall-recording-rc.js?v=rc3
+url: /local/luxe-camera-wall-recording-rc.js?v=rc4
 type: module
 ```
 
@@ -50,6 +50,28 @@ cameras:
 ```
 
 The new card inherits the original responsive layout, screenshot tools, native WebRTC controls, audio exclusivity, playing logic and iPad/iPhone sizing. Only its recording implementation is replaced.
+
+## RC4: iPhone background = abort and discard (new rule)
+
+**Requires both RC4 test backend and RC4 camera-wall JS.** Do not use the RC4 JS with RC3 backend: RC3 does not implement `heartbeat` / `abort` endpoints.
+
+### Expected mobile interaction
+
+- Temporary feedback now reads **录像已开始**, **正在生成录像**, **已打开保存**, or **录像已取消**. No permanent pending-save countdown and no save-confirmation controls are reintroduced.
+- When the official HA iOS App transitions to the background **while a recording is still in progress**, the test wall immediately restores the original Record icon, stops foreground heartbeat, and sends a best-effort \`keepalive\` abort request. The server **discards** the partially recorded MP4 and never exposes a Save/download action.
+- If iOS suspends the WebView before its cancellation request is delivered, the recorder's **server-side foreground lease expires after 12 seconds of missed heartbeats**; a janitor runs every 2 seconds and forces abort. This is a fallback, not an immediate iOS-native background callback; **do not claim zero-delay stop** until actual HA iOS verification.
+- An already completed \`ready\` MP4 (or previously \`presented\` MP4) does not count as **actively recording** and is not aborted merely because the user enters background. If explicit abort races with MP4 finalization, the newly finalized MP4 is still discarded. Existing 15-minute \`ready\`/\`presented\` TTL remains in effect.
+- iOS native save/share dialogs may affect focus without actually backgrounding the app. RC4 deliberately **does not abort on \`blur\`** alone.
+- Leaving/destroying the whole test WebView can also stop its heartbeat; after the lease deadline, the backend may abort unfinished recordings. This is intentional fail-safe behavior for the official iOS App scenario and also applies to other browsers when the JS stops executing.
+
+### Single-device acceptance, before stable release
+
+1. In official Home Assistant iOS App, start a recording and observe REC. Press Home or switch apps *during* recording.
+2. Return to HA: the original record icon should be shown; no Save icon; no MP4 file should be made available for that aborted session.
+3. Repeat one time with a short recording kept in the foreground and manually stopped: normal MP4 download/share must still work, including video, audio and seeking. The completed MP4 retains its 15-minute TTL (or is cleared when the same camera begins a new recording).
+4. If the app's WebView does not receive a background notification, watch server state: no heartbeat should remain; abort must occur automatically after lease expiration and janitor sweep (~12–14 seconds after last renewal in normal conditions).
+5. If background was entered while multiple cameras were recording, **all unfinished sessions** belonging to the active card should abort; completed recordings are not treated as unfinished.
+6. Only after this real-device regression passes is stable `luxe/hlc7` merge/release appropriate. Do not upgrade the currently stable production `1.9.15-luxe.1` based on simulated CI alone.
 
 ## RC3 behavior and upgrade (requires updated backend)
 
@@ -91,4 +113,4 @@ If RC2 is already installed and running, **only replace** `/config/www/luxe-came
 
 ## Rollback
 
-Remove only the test card and RC3 resource from your test dashboard, and stop or uninstall the separate RC Add-on. Do not remove the original camera-wall resource or the production `fee2ccf4_luxe_go2rtc` App.
+Remove only the test card and RC4 resource from your test dashboard, and stop or uninstall the separate RC Add-on. Do not remove the original camera-wall resource or the production `fee2ccf4_luxe_go2rtc` App.
