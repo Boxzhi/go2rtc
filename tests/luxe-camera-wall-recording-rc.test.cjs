@@ -3,7 +3,7 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
 const source=fs.readFileSync('www/luxe-camera-wall-recording-rc.js','utf8');
 const sources=['jinghuafu_keting_ptz_3k','jinghuafu_keting_fixed_3k','jinghuafu_canting_2k'];
-function make(configuredSlug){
+function make(configuredSlug,ingressUrl='/api/hassio_ingress/abc/luxe-xiaomi-recorder-rc.html'){
   let now=Date.parse('2026-11-04T10:00:00Z'),next=0,native=[],shares=[],calls=[],timers=new Map(),tid=0;
   const db=new Map(),elements=new Map(),registry=new Map();
   class FakeDate extends Date{static now(){return now;}}
@@ -46,6 +46,8 @@ function make(configuredSlug){
   }
   async function mockFetch(raw,opts={}){
     const url=new URL(raw),path=url.pathname,method=opts.method||'GET';
+    assert.ok(path.startsWith('/api/hassio_ingress/abc/api/luxe/recordings/'),
+      'recording request must use true Ingress mount, not HTML ingress_entry: '+path);
     if(path.endsWith('/start')&&method==='POST'){
       const request=JSON.parse(opts.body);
       if([...db.values()].some(v=>v.source===request.source&&v.state==='ready'))
@@ -88,7 +90,7 @@ function make(configuredSlug){
       assert.equal(arg.endpoint,
         '/addons/local_luxe_xiaomi_record_rc/info',
         'Supervisor requires full local addon slug');
-      return {ingress_url:'/api/hassio_ingress/abc/'};
+      return {ingress_url:ingressUrl};
     }
     return {session:'session123'};
   }};
@@ -161,10 +163,21 @@ async function noSecondNativeWhileFirstUnconfirmed(){
   assert.equal(h.card._recordings[1].state,'ready','later recording must remain saveable');
 }
 async function localAddonSlugRegression(){
+  const variants=[
+    '/api/hassio_ingress/abc/luxe-xiaomi-recorder-rc.html',
+    '/api/hassio_ingress/abc/',
+    'https://ha.test/api/hassio_ingress/abc/luxe-xiaomi-recorder-rc.html'
+  ];
   for (const configuredSlug of [undefined,'luxe_xiaomi_record_rc','local_luxe_xiaomi_record_rc']){
-    const h=make(configuredSlug);
-    assert.equal(h.card._rcAddonSlug,'local_luxe_xiaomi_record_rc');
-    await h.card._rcIngressBase(); // mock rejects a short slug
+    for(const ingressUrl of variants){
+      const h=make(configuredSlug,ingressUrl);
+      assert.equal(h.card._rcAddonSlug,'local_luxe_xiaomi_record_rc');
+      assert.equal(await h.card._rcIngressBase(),
+        'https://ha.test/api/hassio_ingress/abc/',
+        'must remove the HTML ingress_entry when building recorder API base');
+      await h.card._startRecording(0);
+      assert.equal(h.card._recordings[0].state,'recording');
+    }
   }
 }
 async function test(){
