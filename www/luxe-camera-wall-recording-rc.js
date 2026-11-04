@@ -186,7 +186,7 @@
         if(s?.state==='ready'){
           this._rcNativeSave(index);return;
         }
-        if(s||this._rcBusy[index])return;
+        if((s&&s.state!=='failed')||this._rcBusy[index])return;
         const source=this._rcSource(index);
         if(!/^[A-Za-z0-9_-]{1,100}$/.test(source)){
           this._mediaFeedback(index,'录像源必须是 go2rtc 流名称');return;
@@ -435,7 +435,7 @@
       }
       _rcShareBatch(){
         const batch=this._rcBatch;
-        if(!batch)return;
+        if(!batch||!batch.ids.every(id=>this._recordings.some(s=>valid(s)&&s.id===id)))return;
         // Must be directly triggered by click to retain Web Share user gesture.
         try{
           const promise=navigator.share({files:batch.files});
