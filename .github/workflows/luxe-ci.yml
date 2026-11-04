@@ -23,8 +23,14 @@ jobs:
         with:
           go-version: '1.27'
           cache: true
+      - name: Camera wall connection gate regression
+        run: |
+          node --check www/luxe-camera-wall.js
+          node tests/luxe-camera-wall-controls-ready.test.cjs
+          node --check www/luxe-camera-wall-recording-rc.js
+          node tests/luxe-camera-wall-recording-rc.test.cjs
       - name: Test affected packages
-        run: go test -count=1 ./pkg/h265 ./pkg/iso ./pkg/mp4 ./pkg/xiaomi/miss/...
+        run: go test -count=1 ./internal/luxerecord ./internal/mp4 ./pkg/h265 ./pkg/iso ./pkg/mp4 ./pkg/xiaomi/miss/...
       - name: Build all packages
         run: go build ./...
       - name: Build Linux AMD64 binary
