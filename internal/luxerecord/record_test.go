@@ -296,11 +296,21 @@ func TestForegroundHeartbeatRenewalAvoidsFalseCancellation(t *testing.T) {
 	if s.State!="recording" {t.Fatal("healthy foreground lease was aborted")}
 }
 
-func TestBackgroundAbortNeverDeletesReadyVideo(t *testing.T) {
+func TestBackgroundAbortRaceWithReadyDiscardsMP4(t *testing.T) {
 	m,s:=fixture(t)
 	w:=httptest.NewRecorder()
 	m.serve(w,reqJSON(http.MethodPost,"/api/luxe/recordings/abort/"+s.ID,nil))
 	if w.Code!=http.StatusNoContent {t.Fatalf("abort ready status %d",w.Code)}
-	if s.State!="ready" {t.Fatalf("completed MP4 unexpectedly cancelled: %s",s.State)}
-	if _,err:=os.Stat(m.filePath(s.ID));err!=nil{t.Fatal("ready MP4 deleted on background")}
+	if m.sessions[s.ID]!=nil {t.Fatal("background abort raced with finalization but left a ready MP4")}
+	if _,err:=os.Stat(m.filePath(s.ID));!os.IsNotExist(err) {t.Fatal("race-discarded MP4 still stored")}
+}
+
+func TestBackgroundNeverTouchesPresentedMP4(t *testing.T) {
+	m,s:=fixture(t)
+	s.State="presented"
+	w:=httptest.NewRecorder()
+	m.serve(w,reqJSON(http.MethodPost,"/api/luxe/recordings/abort/"+s.ID,nil))
+	if w.Code!=http.StatusNoContent {t.Fatalf("abort presented status %d",w.Code)}
+	if s.State!="presented" {t.Fatal("previously presented recording must retain its original TTL")}
+	if _,err:=os.Stat(m.filePath(s.ID));err!=nil {t.Fatal("previously presented MP4 was unexpectedly deleted")}
 }
