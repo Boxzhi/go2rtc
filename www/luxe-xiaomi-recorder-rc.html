@@ -26,7 +26,7 @@ button[disabled]{opacity:.4}button.secondary{background:#66778b}button.success{b
 <body>
 <h1>Luxe Xiaomi Camera · 录像 RC</h1>
 <p>基于正式 HLC7 代码的隔离测试 App。三路最多同时录制 30 分钟；每路完成后独立保留 15 分钟，过期撤销下载并清理临时 MP4。</p>
-<p class="note">这是录制功能的集成测试界面，不替换当前的 luxe-camera-wall 控件。官方 Home Assistant iOS App 不会把原生下载弹窗关闭或保存成功反馈给网页；因此只有明确点击“确认已保存”后才删除缓存。</p>
+<p class="note">这是录制功能的集成测试界面，不替换当前的 luxe-camera-wall 控件。官方 Home Assistant iOS App 不会把原生下载弹窗关闭或保存成功反馈给网页；因此不判断是否真正保存；弹窗发起后按钮立即恢复「录制」，服务端缓存最长保留 15 分钟，再次开始同一摄像头录像会提前删除旧缓存。</p>
 <section>
 <h2>录像设置</h2>
 <label for="secret">独立测试密钥</label>
@@ -118,7 +118,7 @@ function draw(){
       btn.textContent="REC · 停止";btn.className="warn";
       btn.addEventListener("click",()=>void stopOne(s));
     }else if(s.state==="ready"){
-      btn.textContent=pendingConfirm.has(s.id)?"重新下载":"保存";
+      btn.textContent="保存";
       btn.className="success";
       btn.addEventListener("click",()=>nativeSave(s));
     }else{
@@ -126,17 +126,6 @@ function draw(){
       btn.disabled=true;
     }
     box.append(btn);
-    if(s?.state==="ready"){
-      const confirmed=document.createElement("button");
-      confirmed.className="secondary";
-      confirmed.textContent="确认已保存";
-      confirmed.addEventListener("click",()=>void ack(s,"saved"));
-      box.append(confirmed);
-      const discard=document.createElement("button");
-      discard.className="warn";discard.textContent="放弃";
-      discard.addEventListener("click",()=>void ack(s,"discard"));
-      box.append(discard);
-    }
     row.append(info,box);root.append(row);
   }
   $("startAll").disabled=hasUnfinished()||entries().some(({session})=>session?.state==="ready");
@@ -154,8 +143,23 @@ function updateShareButton(){
     mayShare(options)?(batchFetching?"正在读取完整 MP4…":"可批量分享（手动点击）"):
     "部分视频较大，建议通过各自的「保存」按钮使用原生 WKDownload";
 }
+async function markPresented(s){
+  try{
+    await call("ack/"+encodeURIComponent(s.id),{
+      method:"POST",headers:auth(true),body:JSON.stringify({action:"presented"})
+    });
+    pendingConfirm.delete(s.id);
+    log(s.source+" 下载/分享窗口已发起，旧 MP4 在服务端保留原始 15 分钟有效期");
+  }catch(e){
+    pendingConfirm.delete(s.id);
+    map.set(s.source,s);
+    feedback("已发起下载，但后端状态同步失败，恢复「保存」入口："+String(e));
+  }finally{draw();void reload();}
+}
 function nativeSave(s){
-  if(!s?.download_url||Date.now()>=Date.parse(s.expires_at)){feedback("录像已过期，不能再下载");void reload();return;}
+  if(!s?.download_url||Date.now()>=Date.parse(s.expires_at)){
+    feedback("录像已过期，不能再下载");void reload();return;
+  }
   const url=new URL(s.download_url,location.href);
   if(url.origin!==location.origin){feedback("拒绝跨源 MP4 链接");return;}
   const a=document.createElement("a");
@@ -164,9 +168,12 @@ function nativeSave(s){
     a.click();
     activeNative=s.id;
     pendingConfirm.add(s.id);
-    log("已请求原生下载："+s.source+"；关闭弹窗不会视为保存成功");
+    map.delete(s.source);
+    log("已发起原生下载："+s.source+"；录像按钮立即恢复，取消保存也无需确认");
+    draw();
+    void markPresented(s);
   }catch(e){feedback("无法启动原生下载："+String(e));}
-  finally{a.remove();draw();}
+  finally{a.remove();}
 }
 function groupReadyAll(ready){
   return currentGroup!==""&&ready.length===cams.length &&
@@ -215,7 +222,7 @@ async function reload(recover=false){
     const result=await call("",{headers:auth()});
     const latest=new Map();
     for(const s of result.sessions||[]){
-      if(!cams.some(c=>c.name===s.source))continue;
+      if(!cams.some(c=>c.name===s.source)||s.state==="presented"||pendingConfirm.has(s.id))continue;
       const existing=latest.get(s.source);
       if(!existing||Date.parse(s.started_at)>Date.parse(existing.started_at))latest.set(s.source,s);
     }
@@ -283,24 +290,6 @@ async function stopOne(s){
     log(s.source+" 正在封装");await reload();
   }catch(e){feedback("停止失败："+String(e));}
 }
-async function ack(s,action){
-  if(action==="saved"&&!confirm("确认已将该 MP4 保存到当前设备？取消保存时不要确认。"))return;
-  if(action==="discard"&&!confirm("放弃此录像？临时文件将立即删除且不可恢复。"))return;
-  try{
-    await call("ack/"+encodeURIComponent(s.id),{
-      method:"POST",headers:auth(true),body:JSON.stringify({action})
-    });
-    pendingConfirm.delete(s.id);
-    previousReady.delete(s.id);
-    if(activeNative===s.id)activeNative=null;
-    map.delete(s.source);
-    if(!readySessions().some(v=>!pendingConfirm.has(v.id))&&!activeNative){
-      autoNativeIssued=false;firstObservedReady=0;
-    }
-    log(s.source+" 用户确认 "+action+"；对应按钮恢复为「录制」");
-    draw();
-  }catch(e){feedback("清理录像失败："+String(e));}
-}
 async function prepareBatch(){
   const ready=readySessions().filter(s=>!pendingConfirm.has(s.id));
   const group=ready.filter(s=>s.group===currentGroup);
@@ -343,9 +332,17 @@ function share(){
   // Called immediately inside the click event, preserving iOS user activation.
   try{
     const promise=navigator.share({files:shareFiles});
+    for(const s of fileset){
+      pendingConfirm.add(s.id);
+      map.delete(s.source);
+    }
+    shareFiles=null;
+    shareIDs="";
+    draw();
+    for(const s of fileset)void markPresented(s);
     Promise.resolve(promise).then(
-      ()=>log("系统分享面板返回；请逐路点击「确认已保存」后释放服务器缓存"),
-      e=>log("批量分享取消或失败："+String(e))
+      ()=>log("已发起多文件分享，所有对应按钮已恢复「录制」"),
+      e=>log("分享面板取消或失败（缓存按原 15 分钟期限保留）："+String(e))
     );
   }catch(e){feedback("无法调用系统分享："+String(e));}
 }
