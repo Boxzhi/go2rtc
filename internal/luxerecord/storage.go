@@ -92,6 +92,19 @@ func (m *manager) deleteFiles(id string) {
 	_ = os.Remove(m.filePath(id)+".part")
 }
 
+// purgePresentedForSourceLocked runs only when the replacement recording is
+// admitted. The MP4 may remain temporarily open by an existing HTTP download
+// reader; unlink revokes subsequent downloads without interrupting the new
+// recording. Requires manager mutex.
+func (m *manager) purgePresentedForSourceLocked(source string) {
+ for id,s := range m.sessions {
+  if s.Source==source && s.State=="presented" {
+   delete(m.sessions,id)
+   m.deleteFiles(id)
+  }
+ }
+}
+
 func (m *manager) pruneLocked(now time.Time) {
 	for id,s:=range m.sessions {
 		if s.State=="recording" || s.State=="stopping" || s.State=="finalizing" {continue}
