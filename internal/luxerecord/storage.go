@@ -26,7 +26,7 @@ func (m *manager) restore() error {
 		data,readErr:=os.ReadFile(m.metaPath(id))
 		var s session
 		if readErr!=nil || json.Unmarshal(data,&s)!=nil ||
-			s.ID!=id || s.State!="ready" ||
+			s.ID!=id || (s.State!="ready" && s.State!="presented") ||
 			!safeName.MatchString(s.Source) ||
 			s.Token=="" || len(s.Token)<20 ||
 			s.ExpiresAt.IsZero() || !now.Before(s.ExpiresAt) ||
@@ -71,7 +71,7 @@ func (m *manager) restore() error {
 }
 
 func (m *manager) saveManifestLocked(s *session) error {
-	if s.State!="ready" {return fmt.Errorf("only finalized MP4 may be persisted")}
+	if s.State!="ready" && s.State!="presented" {return fmt.Errorf("only finalized MP4 may be persisted")}
 	data,err:=json.Marshal(s)
 	if err!=nil{return err}
 	path:=m.metaPath(s.ID)
@@ -117,7 +117,7 @@ func (m *manager) spaceForStartLocked() error {
 	if err:=syscall.Statfs(m.dir,&fs);err!=nil {return err}
 	var completed int64
 	for _,s:=range m.sessions {
-		if s.State=="ready" {completed+=s.Bytes}
+		if s.State=="ready" || s.State=="presented" {completed+=s.Bytes}
 	}
 	count:=len(m.active)+1
 	reserve:=int64(count)*perFileLimit
