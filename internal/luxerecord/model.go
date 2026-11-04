@@ -35,6 +35,10 @@ const (
 	totalLimit int64 = 3 << 30
 	minFree int64 = 1 << 30
 	gracefulDownloadLimit = 5 * time.Minute
+	// Browser sends a heartbeat every 3 seconds. If the iOS WebView is
+	// suspended before its background-abort request completes, the server
+	// drops unfinished MP4s within this finite fallback window.
+	heartbeatTimeout = 12 * time.Second
 )
 
 var safeName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,100}$`)
@@ -55,6 +59,7 @@ type session struct {
 	VideoCodec string `json:"video_codec,omitempty"`
 	AudioCodec string `json:"audio_codec,omitempty"`
 
+	lastHeartbeat time.Time `json:"-"`
 	stop chan struct{} `json:"-"`
 	stopOnce sync.Once
 	stream *streams.Stream `json:"-"`
