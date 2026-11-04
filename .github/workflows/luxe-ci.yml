@@ -27,6 +27,7 @@ jobs:
         run: |
           node --check www/luxe-camera-wall.js
           node tests/luxe-camera-wall-controls-ready.test.cjs
+          node tests/luxe-camera-wall-connect-recovery.test.cjs
           node tests/luxe-camera-wall-unified-recording.test.cjs
       - name: Test affected packages
         run: go test -count=1 ./internal/luxerecord ./internal/mp4 ./pkg/h265 ./pkg/iso ./pkg/mp4 ./pkg/xiaomi/miss/...
@@ -42,9 +43,18 @@ jobs:
           go build -trimpath -ldflags="-s -w" -o dist/go2rtc-linux-amd64 .
           cp www/luxe-camera-wall.js dist/luxe-camera-wall.js
           cp docs/luxe-camera-wall-official-upgrade-1.9.15-luxe.3.md dist/INSTALL-luxe-1.9.15-luxe.3.md
+          cp docs/luxe-camera-wall-v1.1.2-connect-recovery.md dist/INSTALL-camera-wall-v1.1.2.md
           sha256sum dist/go2rtc-linux-amd64 dist/luxe-camera-wall.js > dist/SHA256SUMS.txt
       - name: Upload Linux AMD64 artifact
         uses: actions/upload-artifact@v4
         with:
           name: go2rtc-luxe-1.9.15-luxe.3-ha-ingress-no-secret
           path: dist/*
+
+      - name: Upload camera-wall v1.1.2 only
+        uses: actions/upload-artifact@v4
+        with:
+          name: luxe-camera-wall-v1.1.2-connect-recovery
+          path: |
+            dist/luxe-camera-wall.js
+            dist/INSTALL-camera-wall-v1.1.2.md
