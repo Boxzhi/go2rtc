@@ -149,3 +149,85 @@ func TestExpiredAndFailedNotListedAsReady(t *testing.T){
 	m.serve(w,reqJSON("GET","/api/luxe/recordings/",nil))
 	if strings.Contains(w.Body.String(),s.ID){t.Fatalf("expired session listed: %s",w.Body.String())}
 }
+
+
+func TestPresentedAckHidesButRetainsMP4For15Minutes(t *testing.T) {
+	m,s:=fixture(t)
+	originalDeadline:=s.ExpiresAt
+	w:=httptest.NewRecorder()
+	m.serve(w,reqJSON(http.MethodPost,"/api/luxe/recordings/ack/"+s.ID,
+		map[string]string{"action":"presented"}))
+	if w.Code!=http.StatusNoContent {
+		t.Fatalf("presented ack: %d %s",w.Code,w.Body.String())
+	}
+	if s.State!="presented" {t.Fatalf("state=%s, want presented",s.State)}
+	if !s.ExpiresAt.Equal(originalDeadline) {t.Fatal("presentation must not extend TTL")}
+	if _,err:=os.Stat(m.filePath(s.ID));err!=nil{t.Fatalf("presented MP4 deleted early: %v",err)}
+	list:=httptest.NewRecorder()
+	m.serve(list,reqJSON(http.MethodGet,"/api/luxe/recordings/",nil))
+	if list.Code!=http.StatusOK || !strings.Contains(list.Body.String(),`"presented"`) {
+		t.Fatalf("presented metadata missing: %d %s",list.Code,list.Body.String())
+	}
+	if strings.Contains(list.Body.String(),`"download_url"`) {
+		t.Fatal("presented session must not expose new Save entrypoint")
+	}
+	// Existing native downloads may issue Range requests after sheet opens;
+	// do not revoke a previously issued capability until TTL or next recording.
+	rangeRequest:=httptest.NewRequest("GET",
+		"/api/luxe/recordings/file/"+s.ID+"?token="+s.Token,nil)
+	rangeRequest.Header.Set("Range","bytes=4-7")
+	partial:=httptest.NewRecorder()
+	m.serve(partial,rangeRequest)
+	if partial.Code!=http.StatusPartialContent||partial.Body.String()!="ftyp" {
+		t.Fatalf("existing capability not usable during TTL: %d %q",partial.Code,partial.Body.String())
+	}
+	again:=httptest.NewRecorder()
+	m.serve(again,reqJSON(http.MethodPost,"/api/luxe/recordings/ack/"+s.ID,
+		map[string]string{"action":"presented"}))
+	if again.Code!=http.StatusNoContent {t.Fatalf("presented must be idempotent: %d",again.Code)}
+	m.pruneLocked(originalDeadline)
+	if m.sessions[s.ID]!=nil{t.Fatal("presented cache not deleted at original 15m expiry")}
+	if _,err:=os.Stat(m.filePath(s.ID));!os.IsNotExist(err){
+		t.Fatal("presented MP4 still present after TTL")
+	}
+}
+
+func TestNewSameCameraRecordingPurgesPresentedCacheOnly(t *testing.T) {
+	m,s:=fixture(t)
+	s.State="presented"
+	if err:=m.saveManifestLocked(s);err!=nil {t.Fatal(err)}
+	other:=*s
+	other.ID="other_session_9876543210"
+	other.Source="jinghuafu_keting_fixed_3k"
+	other.Token="other_capability_9876543210"
+	other.stop=nil;other.stream=nil;other.consumer=nil
+	m.sessions[other.ID]=&other
+	fileData,err:=os.ReadFile(m.filePath(s.ID))
+	if err!=nil{t.Fatal(err)}
+	if err:=os.WriteFile(m.filePath(other.ID),fileData,0600);err!=nil{t.Fatal(err)}
+	if err:=m.saveManifestLocked(&other);err!=nil{t.Fatal(err)}
+
+	m.purgePresentedForSourceLocked(s.Source)
+	if _,found:=m.sessions[s.ID];found{t.Fatal("same camera session not purged")}
+	if _,err:=os.Stat(m.filePath(s.ID));!os.IsNotExist(err){t.Fatal("old MP4 still on disk")}
+	if _,err:=os.Stat(m.metaPath(s.ID));!os.IsNotExist(err){t.Fatal("old session manifest still on disk")}
+	if _,found:=m.sessions[other.ID];!found{t.Fatal("different camera cache was incorrectly purged")}
+	if _,err:=os.Stat(m.filePath(other.ID));err!=nil{t.Fatal("other camera MP4 removed")}
+
+	// User never clicked Save on this session. Its not-yet-presented video
+	// must remain ready and may still block a same-camera replacement.
+	other.State="ready"
+	m.purgePresentedForSourceLocked(other.Source)
+	if _,found:=m.sessions[other.ID];!found{t.Fatal("unpresented ready file should not be discarded")}
+}
+
+func TestPresentedSessionRestoresHiddenAfterRestart(t *testing.T) {
+	m,s:=fixture(t)
+	s.State="presented"
+	if err:=m.saveManifestLocked(s);err!=nil{t.Fatal(err)}
+	next,err:=newManager(strings.Repeat("K",32),m.dir)
+	if err!=nil{t.Fatal(err)}
+	recovered:=next.sessions[s.ID]
+	if recovered==nil||recovered.State!="presented"{t.Fatalf("restored wrong state: %+v",recovered)}
+	if _,err:=os.Stat(next.filePath(s.ID));err!=nil{t.Fatal("restart should retain presented MP4 until TTL")}
+}
