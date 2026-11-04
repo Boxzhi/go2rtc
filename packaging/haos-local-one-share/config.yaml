@@ -1,0 +1,28 @@
+name: "Luxe Three MP4 One Share POC"
+slug: "luxe_three_mp4_share_poc"
+version: "0.4.0"
+description: "Isolated three go2rtc short recordings with one iOS share operation"
+stage: experimental
+url: "https://github.com/Boxzhi/go2rtc/tree/feat/luxe-three-mp4-one-share"
+arch:
+  - amd64
+startup: application
+boot: manual
+init: false
+ingress: true
+ingress_port: 1984
+ingress_entry: "luxe-three-record-one-share-poc.html"
+panel_title: "Luxe 三路一次保存"
+panel_icon: "mdi:file-video"
+panel_admin: true
+options:
+  source_1: "rtsp://fee2ccf4-luxe-go2rtc:8554/jinghuafu_keting_ptz_3k"
+  source_2: "rtsp://fee2ccf4-luxe-go2rtc:8554/jinghuafu_keting_fixed_3k"
+  source_3: "rtsp://fee2ccf4-luxe-go2rtc:8554/jinghuafu_canting_2k"
+  secret: ""
+schema:
+  source_1: str
+  source_2: str
+  source_3: str
+  secret: password
+backup: cold
