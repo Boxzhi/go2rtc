@@ -104,7 +104,9 @@ func TestInvalidAckDoesNotDeleteReadyMP4(t *testing.T){
 func TestAuthorizedRangeAndExpiredDownload(t *testing.T){
 	m,s:=fixture(t)
 	wrong:=httptest.NewRecorder()
-	m.serve(wrong,httptest.NewRequest("GET","/api/luxe/recordings/file/"+s.ID+"?token=no",nil))
+	wrongRequest:=httptest.NewRequest("GET","/api/luxe/recordings/file/"+s.ID+"?token=no",nil)
+	wrongRequest.RemoteAddr="172.30.32.2:4242"
+	m.serve(wrong,wrongRequest)
 	if wrong.Code!=404{t.Fatalf("bad token: %d",wrong.Code)}
 
 	r:=httptest.NewRequest("GET","/api/luxe/recordings/file/"+s.ID+"?token="+s.Token,nil)
@@ -119,7 +121,9 @@ func TestAuthorizedRangeAndExpiredDownload(t *testing.T){
 	s.ExpiresAt=time.Now().Add(-time.Second)
 	m.mu.Unlock()
 	expired:=httptest.NewRecorder()
-	m.serve(expired,httptest.NewRequest("GET","/api/luxe/recordings/file/"+s.ID+"?token="+s.Token,nil))
+	expiredRequest:=httptest.NewRequest("GET","/api/luxe/recordings/file/"+s.ID+"?token="+s.Token,nil)
+	expiredRequest.RemoteAddr="172.30.32.2:4242"
+	m.serve(expired,expiredRequest)
 	if expired.Code!=404{t.Fatalf("expired capability accepted: %d",expired.Code)}
 	if _,err:=os.Stat(m.filePath(s.ID));!os.IsNotExist(err){t.Fatal("expired file retained")}
 }
