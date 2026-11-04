@@ -41,10 +41,10 @@ jobs:
           mkdir -p dist
           go build -trimpath -ldflags="-s -w" -o dist/go2rtc-linux-amd64 .
           cp www/luxe-camera-wall.js dist/luxe-camera-wall.js
-          cp docs/luxe-camera-wall-official-upgrade-1.9.15-luxe.2.md dist/INSTALL-luxe-1.9.15-luxe.2.md
+          cp docs/luxe-camera-wall-official-upgrade-1.9.15-luxe.3.md dist/INSTALL-luxe-1.9.15-luxe.3.md
           sha256sum dist/go2rtc-linux-amd64 dist/luxe-camera-wall.js > dist/SHA256SUMS.txt
       - name: Upload Linux AMD64 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: go2rtc-luxe-1.9.15-luxe.2-with-single-camera-wall
+          name: go2rtc-luxe-1.9.15-luxe.3-ha-ingress-no-secret
           path: dist/*

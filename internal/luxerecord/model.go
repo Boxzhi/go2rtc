@@ -5,17 +5,15 @@ package luxerecord
 
 import (
 	"crypto/rand"
-	"crypto/subtle"
-	"encoding/base64"
+		"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"net/http"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
-	"sync"
+		"sync"
 	"time"
 
 	"github.com/AlexxIT/go2rtc/internal/api"
@@ -101,20 +99,16 @@ func (s *session) view() view {
 
 type manager struct {
 	mu sync.Mutex
-	secret string
 	dir string
 	sessions map[string]*session
 	active map[string]string // source -> reservation ID, including network setup
 }
 
-func newManager(secret, directory string) (*manager, error) {
-	if len(secret)<24 {
-		return nil, fmt.Errorf("recording secret must contain at least 24 characters")
-	}
+func newManager(directory string) (*manager, error) {
 	if err:=os.MkdirAll(directory,0700);err!=nil { return nil,err }
 	if err:=os.Chmod(directory,0700);err!=nil {return nil,err}
 	m:=&manager{
-		secret:secret,dir:directory,
+		dir:directory,
 		sessions:make(map[string]*session),
 		active:make(map[string]string),
 	}
@@ -126,7 +120,6 @@ func Init() {
 	var cfg struct {
 		Recording struct {
 			Enabled bool `yaml:"enabled"`
-			Secret string `yaml:"secret"`
 			Directory string `yaml:"directory"`
 		} `yaml:"luxe_recording"`
 	}
@@ -135,9 +128,9 @@ func Init() {
 	log:=app.GetLogger("luxerecord")
 	dir:=cfg.Recording.Directory
 	if dir=="" {dir="/data/luxe-recordings"}
-	m,err:=newManager(cfg.Recording.Secret,dir)
+	m,err:=newManager(dir)
 	if err!=nil {
-		log.Error().Err(err).Msg("Luxe recorder disabled: invalid secure cache configuration")
+		log.Error().Err(err).Msg("Luxe recorder disabled: invalid cache configuration")
 		return
 	}
 	api.HandleFunc("api/luxe/recordings/",m.serve)
@@ -151,10 +144,16 @@ func randID() (string,error) {
 	return base64.RawURLEncoding.EncodeToString(buf),nil
 }
 
-func (m *manager) authorized(r *http.Request) bool {
-	value:=strings.TrimSpace(r.Header.Get("X-Luxe-Record-Key"))
-	return len(value)==len(m.secret) &&
-		subtle.ConstantTimeCompare([]byte(value),[]byte(m.secret))==1
+// Supervisor verifies the user's authenticated Ingress session before
+// proxying traffic to this app. The documented proxy gateway is 172.30.32.2.
+// Only the TCP peer address is trusted: request headers such as
+// X-Remote-User-Id and X-Forwarded-For can be forged on a direct 1984 socket.
+// No additional user-supplied secret is required.
+func supervisorIngressRequest(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil { return false }
+	ip := net.ParseIP(host)
+	return ip != nil && ip.Equal(net.ParseIP("172.30.32.2"))
 }
 
 func jsonResponse(w http.ResponseWriter,code int,data any) {

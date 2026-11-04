@@ -1,4 +1,4 @@
-/* 京华府 · 三画面自适应视频墙 v1.1.0 · 视频就绪前禁用交互控制
+/* 京华府 · 三画面自适应视频墙 v1.1.1 · 视频就绪前禁用交互控制
  * - 无重叠矩形拼接；逐项比较总有效视频面积
  * - 尊重视频 videoWidth/videoHeight；object-fit:contain，绝不裁切
  * - 仅通过 absolute 位置/尺寸布局，切换排布不重建播放器
@@ -2176,47 +2176,12 @@
     '.tile.luxe-rc-ready .luxe-media-snapshot { display:none; }',
     '.luxe-rc-group {position:absolute;left:50%;top:9px;transform:translateX(-50%);z-index:30;border:0;border-radius:10px;padding:10px 14px;background:rgba(5,104,131,.96);color:white;font-weight:700;white-space:nowrap;cursor:pointer;}',
     '.luxe-rc-group[hidden] {display:none!important;}',
-    '.luxe-rc-keyback {position:fixed;inset:0;background:rgba(3,10,18,.75);display:grid;place-items:center;z-index:9999;padding:16px;box-sizing:border-box;}',
-    '.luxe-rc-keypanel {background:#172433;color:#f7fafe;border:1px solid #809aad;border-radius:14px;box-sizing:border-box;padding:20px;width:min(360px,100%);font:14px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;}',
-    '.luxe-rc-keypanel input {box-sizing:border-box;width:100%;font-size:16px;border:1px solid #a4b9cd;background:#0b1625;color:white;border-radius:8px;padding:10px;margin:10px 0;}',
-    '.luxe-rc-keypanel button {background:#2768af;color:white;border:0;padding:9px 14px;border-radius:8px;margin-right:8px;}'
   ].join('\n');
-  async function askKey(card){
-    if(card._rcKey)return card._rcKey;
-    if(card._rcKeyPending)return card._rcKeyPending;
-    card._rcKeyPending=new Promise(resolve=>{
-      const back=document.createElement('div');
-      back.className='luxe-rc-keyback';
-      const panel=document.createElement('div');
-      panel.className='luxe-rc-keypanel';
-      const heading=document.createElement('strong');
-      heading.textContent='Luxe go2rtc 录像密钥';
-      const help=document.createElement('p');
-      help.textContent='请输入 go2rtc.yaml 中 luxe_recording.secret 的值（至少 24 字符）。仅保留在卡片内存，不写入仪表盘配置。';
-      const inp=document.createElement('input');
-      inp.type='password';inp.autocomplete='off';inp.placeholder='录像密钥';
-      const ok=document.createElement('button');ok.textContent='确认';
-      const cancel=document.createElement('button');cancel.textContent='取消';
-      panel.append(heading,help,inp,ok,cancel);back.append(panel);
-      card.shadowRoot.append(back);
-      const done=key=>{back.remove();resolve(key);};
-      ok.addEventListener('click',()=>{
-        const key=inp.value.trim();
-        if(key.length<24){inp.setCustomValidity('密钥长度不得少于24字符');inp.reportValidity();return;}
-        card._rcKey=key;done(key);
-      });
-      inp.addEventListener('keydown',e=>{if(e.key==='Enter')ok.click();});
-      cancel.addEventListener('click',()=>done(''));
-      inp.focus();
-    }).finally(()=>{card._rcKeyPending=null;});
-    return card._rcKeyPending;
-  }
 
 
     class LuxeIntegratedCameraWall extends Base {
       constructor(){
         super();
-        this._rcKey='';
         this._rcIngressPromise=null;
         this._rcPoll=null;
         this._rcBusy=[false,false,false];
@@ -2310,7 +2275,7 @@
         if(this._rcPoll)return;
         this._rcPoll=setInterval(()=>void this._rcRefresh(),1600);
         this._rcHeartbeatInterval=setInterval(()=>void this._rcHeartbeat(),3000);
-        if(this._rcKey)void this._rcRefresh(true);
+        if(this._hass?.callWS)void this._rcRefresh(true);
       }
       _rcOnVisibility(){
         // Never abort on blur alone: native iOS dialogs can remove focus
@@ -2324,12 +2289,12 @@
       }
       _rcRequestBackgroundAction(id,action,keepalive=false){
         // Background transitions cannot wait for a Supervisor WS handshake.
-        if(!this._rcKey||!this._rcResolvedBase||!id)return Promise.resolve();
+        if(!this._rcResolvedBase||!id)return Promise.resolve();
         const url=new URL('api/luxe/recordings/'+action+'/'+encodeURIComponent(id),
           this._rcResolvedBase);
         return fetch(url,{
           method:'POST',credentials:'same-origin',cache:'no-store',
-          keepalive,headers:{'X-Luxe-Record-Key':this._rcKey}
+          keepalive
         });
       }
       _rcHeartbeat(){
@@ -2367,13 +2332,13 @@
         if(this._rcIngressPromise)return this._rcIngressPromise;
         this._rcIngressPromise=(async()=>{
           const hass=this._hass;
-          if(!hass?.callWS)throw Error('需要在管理员 HA 仪表盘中使用本测试卡片');
+          if(!hass?.callWS)throw Error('请通过已登录的 Home Assistant 仪表盘使用监控墙');
           const raw=await hass.callWS({
             type:'supervisor/api',
             endpoint:'/addons/'+this._rcAddonSlug+'/info',
             method:'get',
           });
-          if(!raw?.ingress_url)throw Error('无法获取 RC Add-on Ingress 地址');
+          if(!raw?.ingress_url)throw Error('无法获取正式 Luxe go2rtc 的 HA Ingress 地址');
           const session=await hass.callWS({
             type:'supervisor/api',endpoint:'/ingress/session',method:'post',
           });
@@ -2395,10 +2360,10 @@
         return this._rcIngressPromise;
       }
       async _rcRequest(route,method='GET',payload){
-        const key=await askKey(this);
-        if(!key)throw Error('未设置录像 RC 测试密钥');
+        // HA Ingress authenticates the logged-in user; there is no
+        // recorder-specific key or second authentication dialog.
         const base=await this._rcIngressBase();
-        const headers={'X-Luxe-Record-Key':key};
+        const headers={};
         if(payload!==undefined)headers['Content-Type']='application/json';
         const response=await fetch(new URL('api/luxe/recordings/'+route,base),{
           method,credentials:'same-origin',cache:'no-store',headers,
@@ -2409,11 +2374,11 @@
         try{
           data=await response.json();
         }catch(_){
-          // Do not print URLs, ingress session tokens, the secret or
-          // arbitrary HTML returned by a broken proxy/login redirect.
+          // Do not print URLs, ingress session tokens or arbitrary HTML
+          // returned by a proxy/login redirect.
           const contentType=response.headers?.get?.('content-type')?.split(';')[0]||'未知类型';
           throw Error('录像 API 返回非 JSON（HTTP '+response.status+
-            '，'+contentType+'）。请检查 RC Ingress 会话及代理路径');
+            '，'+contentType+'）。请检查 HA Ingress 会话及代理路径');
         }
         if(!response.ok)throw Error(data?.error||'录像 API HTTP '+response.status);
         if(!data||typeof data!=='object')throw Error('录像 API 数据结构异常');
@@ -2438,7 +2403,6 @@
         this._recordings[index]={state:'starting',startedAt:Date.now()};
         this._syncRecordingUI(index);
         try{
-          if(!await askKey(this))throw Error('未提供录像测试密钥');
           const now=Date.now();
           if(!this._rcGroup || now-this._rcGroupAt>8000 ||
               (this._rcAutoDone && this._rcExpected.size>0)){
@@ -2505,7 +2469,7 @@
         };
       }
       async _rcRefresh(recovery=false){
-        if(!this.isConnected||document.hidden||!this._rcKey||this._rcRefreshing)return;
+        if(!this.isConnected||document.hidden||!this._hass?.callWS||this._rcRefreshing)return;
         this._rcRefreshing=true;
         const generation=this._rcGeneration;
         const backgroundEpoch=this._rcBackgroundEpoch;

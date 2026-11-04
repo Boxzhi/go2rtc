@@ -87,12 +87,13 @@ assert.equal(typeof Wall.calculateLayout,'function');
 assert.equal(typeof Wall.prototype._rcRefresh,'function','recorder methods should be intrinsic');
 assert.equal(typeof Wall.prototype._rcAbortOnBackground,'function');
 assert.doesNotMatch(source,/customElements\.define\(['"]luxe-camera-wall-recording-rc/);
+assert.doesNotMatch(source,/askKey\(|X-Luxe-Record-Key|_rcKey|录像密钥/,
+  'official recording UI must not require second secret');
 
 async function main(){
   const card=new Wall();
   card.setConfig({cameras:sources.map(url=>({url}))});
   assert.equal(card._rcAddonSlug,'fee2ccf4_luxe_go2rtc');
-  card._rcKey='long-production-secret-0123456789-abcdef';
   card._hass={callWS:async arg=>{
     if(arg.endpoint.endsWith('/info')){
       assert.equal(arg.endpoint,'/addons/fee2ccf4_luxe_go2rtc/info');
@@ -129,6 +130,10 @@ async function main(){
   assert.equal(sessions.has(s.id),false,'new same-camera recording drops previously presented MP4');
   assert.equal(card._recordings[0].state,'recording');
   assert.ok(requests.some(r=>r.path.endsWith('/start')));
+  assert.ok(requests.every(r=>!Object.keys(r.headers||{}).some(
+    key=>key.toLowerCase()==='x-luxe-record-key')),
+    'no recorder secret should be transmitted');
+  assert.ok(!('_rcKey' in card),'recorder secret must not be kept in card memory');
   console.log('PASS single-file official add-on ingress, recording, background-abort, download, presented cache, new recording');
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});

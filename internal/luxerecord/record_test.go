@@ -15,7 +15,7 @@ import (
 func fixture(t *testing.T) (*manager,*session) {
 	t.Helper()
 	dir:=t.TempDir()
-	m,err:=newManager(strings.Repeat("K",32),dir)
+	m,err:=newManager(dir)
 	if err!=nil{t.Fatal(err)}
 	id:="testsession_1234567890123"
 	now:=time.Now().UTC()
@@ -39,7 +39,7 @@ func reqJSON(method,target string,body any)*http.Request{
 	var payload bytes.Buffer
 	if body!=nil {_=json.NewEncoder(&payload).Encode(body)}
 	r:=httptest.NewRequest(method,target,&payload)
-	r.Header.Set("X-Luxe-Record-Key",strings.Repeat("K",32))
+	r.RemoteAddr="172.30.32.2:4242"
 	return r
 }
 
@@ -59,7 +59,7 @@ func TestRecordingRetentionStartsAtReady(t *testing.T) {
 func TestRecordingRestoresValidMP4AcrossRestart(t *testing.T) {
 	m,s:=fixture(t)
 	_ = os.WriteFile(filepath.Join(m.dir,"broken.mp4.part"),[]byte("partial"),0600)
-	next,err:=newManager(strings.Repeat("K",32),m.dir)
+	next,err:=newManager(m.dir)
 	if err!=nil{t.Fatal(err)}
 	got:=next.sessions[s.ID]
 	if got==nil||got.State!="ready"||got.ExpiresAt!=s.ExpiresAt ||
@@ -104,10 +104,13 @@ func TestInvalidAckDoesNotDeleteReadyMP4(t *testing.T){
 func TestAuthorizedRangeAndExpiredDownload(t *testing.T){
 	m,s:=fixture(t)
 	wrong:=httptest.NewRecorder()
-	m.serve(wrong,httptest.NewRequest("GET","/api/luxe/recordings/file/"+s.ID+"?token=no",nil))
+	wrongRequest:=httptest.NewRequest("GET","/api/luxe/recordings/file/"+s.ID+"?token=no",nil)
+	wrongRequest.RemoteAddr="172.30.32.2:4242"
+	m.serve(wrong,wrongRequest)
 	if wrong.Code!=404{t.Fatalf("bad token: %d",wrong.Code)}
 
 	r:=httptest.NewRequest("GET","/api/luxe/recordings/file/"+s.ID+"?token="+s.Token,nil)
+	r.RemoteAddr="172.30.32.2:4242"
 	r.Header.Set("Range","bytes=4-7")
 	ok:=httptest.NewRecorder()
 	m.serve(ok,r)
@@ -118,17 +121,53 @@ func TestAuthorizedRangeAndExpiredDownload(t *testing.T){
 	s.ExpiresAt=time.Now().Add(-time.Second)
 	m.mu.Unlock()
 	expired:=httptest.NewRecorder()
-	m.serve(expired,httptest.NewRequest("GET","/api/luxe/recordings/file/"+s.ID+"?token="+s.Token,nil))
+	expiredRequest:=httptest.NewRequest("GET","/api/luxe/recordings/file/"+s.ID+"?token="+s.Token,nil)
+	expiredRequest.RemoteAddr="172.30.32.2:4242"
+	m.serve(expired,expiredRequest)
 	if expired.Code!=404{t.Fatalf("expired capability accepted: %d",expired.Code)}
 	if _,err:=os.Stat(m.filePath(s.ID));!os.IsNotExist(err){t.Fatal("expired file retained")}
 }
 
-func TestMissingKeyAndNoImplicitSave(t *testing.T){
+func TestIngressOnlyWithoutSecondSecret(t *testing.T){
 	m,s:=fixture(t)
-	r:=httptest.NewRequest("GET","/api/luxe/recordings/",nil)
-	w:=httptest.NewRecorder();m.serve(w,r)
-	if w.Code!=401{t.Fatal("listing without key")}
-	if s.State!="ready"{t.Fatal("download state changed without explicit ack")}
+	tests:=[]struct{
+		name,remote string
+		forged bool
+		want int
+	}{
+		{"direct-lan","192.168.1.23:52321",false,http.StatusForbidden},
+		{"direct-with-forged-user-header","192.168.1.23:52321",true,http.StatusForbidden},
+		{"direct-loopback","127.0.0.1:11220",false,http.StatusForbidden},
+		{"valid-supervisor-ingress","172.30.32.2:4242",false,http.StatusOK},
+		{"valid-supervisor-ingress-no-user-header","172.30.32.2:4242",true,http.StatusOK},
+		{"invalid-forwarded-source","172.30.32.44:4242",true,http.StatusForbidden},
+	}
+	for _,tt:=range tests{
+		t.Run(tt.name,func(t *testing.T){
+			r:=httptest.NewRequest(http.MethodGet,"/api/luxe/recordings/",nil)
+			r.RemoteAddr=tt.remote
+			if tt.forged {
+				r.Header.Set("X-Remote-User-Id","spoofed-user")
+				r.Header.Set("X-Forwarded-For","172.30.32.2")
+				r.Header.Set("X-Luxe-Record-Key",strings.Repeat("K",32))
+			}
+			w:=httptest.NewRecorder()
+			m.serve(w,r)
+			if w.Code!=tt.want{t.Fatalf("response %d; want %d; body=%s",w.Code,tt.want,w.Body.String())}
+		})
+	}
+	if s.State!="ready"{t.Fatal("unauthorized access changed ready session")}
+}
+
+func TestMP4DownloadAlsoIngressOnly(t *testing.T){
+	m,s:=fixture(t)
+	for _,remote:=range []string{"127.0.0.1:1234","192.168.1.7:9090"}{
+		r:=httptest.NewRequest(http.MethodGet,"/api/luxe/recordings/file/"+s.ID+"?token="+s.Token,nil)
+		r.RemoteAddr=remote
+		w:=httptest.NewRecorder()
+		m.serve(w,r)
+		if w.Code!=http.StatusForbidden{t.Fatalf("download exposed on %s: %d",remote,w.Code)}
+	}
 }
 
 func TestLimitedMP4Writer(t *testing.T){
@@ -175,6 +214,7 @@ func TestPresentedAckHidesButRetainsMP4For15Minutes(t *testing.T) {
 	// do not revoke a previously issued capability until TTL or next recording.
 	rangeRequest:=httptest.NewRequest("GET",
 		"/api/luxe/recordings/file/"+s.ID+"?token="+s.Token,nil)
+	rangeRequest.RemoteAddr="172.30.32.2:4242"
 	rangeRequest.Header.Set("Range","bytes=4-7")
 	partial:=httptest.NewRecorder()
 	m.serve(partial,rangeRequest)
@@ -225,7 +265,7 @@ func TestPresentedSessionRestoresHiddenAfterRestart(t *testing.T) {
 	m,s:=fixture(t)
 	s.State="presented"
 	if err:=m.saveManifestLocked(s);err!=nil{t.Fatal(err)}
-	next,err:=newManager(strings.Repeat("K",32),m.dir)
+	next,err:=newManager(m.dir)
 	if err!=nil{t.Fatal(err)}
 	recovered:=next.sessions[s.ID]
 	if recovered==nil||recovered.State!="presented"{t.Fatalf("restored wrong state: %+v",recovered)}
