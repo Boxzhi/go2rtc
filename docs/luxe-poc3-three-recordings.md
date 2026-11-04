@@ -55,3 +55,32 @@ POC.3 extends the same approach to **three independently saved MP4 files**, with
 - Go unit and build success alone do not prove real three-camera source reliability.
 - The server does temporarily write MP4 files to container disk (on HAOS/NAS-backed VM storage), then expires them. This is not a permanent recording library.
 - A user-declared save acknowledgment is **not** a verifiable native filesystem write result. Never release server files solely on that claim until the intended retry behavior is verified.
+
+## POC.3 v0.3.1 — partial success and RTSP timeout diagnostics
+
+The first real three-camera test on the official HA iOS App showed:
+- Living room PTZ: a recording session was created with H.265 / Opus.
+- Dining room: a recording session was created with H.265 / FLAC.
+- Living room fixed: RTSP TCP read timed out against the **confirmed** production add-on DNS/port `fee2ccf4-luxe-go2rtc:8554`.
+- The 0.3.0 page refused to download any recording whenever one failed to start, even if others finished successfully.
+
+The original screenshots confirm two sessions were established, **not** that the two MP4 files were ready and playable. Do not claim POC.3 success until all three files have been separately validated.
+
+Changes in 0.3.1:
+
+1. Start mode selector: `三路同时启动` (baseline), `仅录制客厅固定` (isolates failing stream), `三路错峰启动` (start requests 3 seconds apart to probe concurrent connection pressure).
+2. Successful, finalized recordings can enter a **partial** native download queue, with explicit counts such as `2/3`; a failed camera is never silently considered successful.
+3. Queue labels use the actual media source, not an assumed list index, to avoid mislabeling files when one is missing.
+4. The first successful file is requested automatically once this batch has finalized. For the next file, native save confirmation still requires a **real user action**. There is no arbitrary timer or fabricated iOS download callback.
+5. CI additionally checks inline test-page JavaScript syntax and the new diagnostic controls.
+
+### Validation order (do not change the production add-on)
+
+- Update only the separate `Luxe After-Stop Recording POC.3` local app to **0.3.1** using the new isolated Actions artifact. POC.2 and production `Luxe go2rtc (HLC7)` remain unchanged.
+- First test **only `客厅固定`**, 10 seconds. If this times out even alone, diagnose the upstream fixed camera RTSP source and production go2rtc logs. Do not attribute it to simultaneous starts.
+- If it works alone, select **three cameras, staggered by 3 seconds**. Observe whether all three reach `ready` and are playable.
+- Finally rerun **all three simultaneously** to compare. The test page must still let users save any independently successful recordings if the third fails again.
+- Record each source's startup result and MP4 codec/size. Do not mistake a `recording` state for `ready`.
+- If the fixed camera fails even when alone, inspect the production add-on's **specific** RTSP/server log and whether the fixed video preview works; no production changes are justified yet.
+
+The earlier 0.3.0 build should remain archived as a reference, not be installed over the production go2rtc.
