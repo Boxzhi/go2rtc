@@ -50,7 +50,6 @@
         const key=inp.value.trim();
         if(key.length<24){inp.setCustomValidity('密钥长度不得少于24字符');inp.reportValidity();return;}
         card._rcKey=key;done(key);
-        void card._rcRefresh(true);
       });
       inp.addEventListener('keydown',e=>{if(e.key==='Enter')ok.click();});
       cancel.addEventListener('click',()=>done(''));
@@ -196,6 +195,7 @@
         this._recordings[index]={state:'starting',startedAt:Date.now()};
         this._syncRecordingUI(index);
         try{
+          if(!await askKey(this))throw Error('未提供录像测试密钥');
           const now=Date.now();
           if(!this._rcGroup || now-this._rcGroupAt>8000 ||
               (this._rcAutoDone && this._rcExpected.size>0)){
@@ -210,6 +210,7 @@
           });
           this._rcExpected.add(source);
           this._recordings[index]=this._rcMapState(result);
+          this._rcAutoDone=false; // New sessions in the current active group are eligible.
           this._mediaFeedback(index,'服务器已开始录像');
           void this._rcRefresh();
         }catch(e){
@@ -217,6 +218,7 @@
           this._mediaFeedback(index,'录像启动失败：'+errorText(e));
         }finally{
           this._rcBusy[index]=false;this._syncRecordingUI(index);
+          void this._rcRefresh();
         }
       }
       async _stopRecording(index){
