@@ -48,6 +48,8 @@ function make(){
     const url=new URL(raw),path=url.pathname,method=opts.method||'GET';
     if(path.endsWith('/start')&&method==='POST'){
       const request=JSON.parse(opts.body);
+      if([...db.values()].some(v=>v.source===request.source&&v.state==='ready'))
+        return response({error:'camera has pending video to save or discard'},409);
       const id='id_'+(++next);
       const s={id,source:request.source,group:request.group,filename:id+'.mp4',
         state:'recording',started_at:new Date(now).toISOString(),bytes:0,video_codec:'H265',audio_codec:'Opus'};
