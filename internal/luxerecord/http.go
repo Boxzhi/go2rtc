@@ -107,7 +107,18 @@ func (m *manager) heartbeat(w http.ResponseWriter,id string) {
 func (m *manager) abort(w http.ResponseWriter,id string) {
 	if !safeName.MatchString(id) {errorResponse(w,404,"recording unavailable");return}
 	m.mu.Lock()
-	if s:=m.sessions[id];s!=nil {m.abortLocked(s)}
+	if s:=m.sessions[id];s!=nil {
+		// If finalization won the race with the background event, the
+		// explicit abort still must discard this newly completed MP4.
+		// Only the caller's actively recording session sends abort.
+		if s.State=="ready" {
+			delete(m.sessions,id)
+			m.deleteFiles(id)
+			if m.active[s.Source]==id {delete(m.active,s.Source)}
+		} else {
+			m.abortLocked(s)
+		}
+	}
 	m.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }
