@@ -169,7 +169,8 @@ async function staggered(){
   assert.equal([...h.db.values()].filter(s=>s.state==='presented').length,2);
   // Navigating away must not request stop from server.
   await h.card._stopAllRecordings('navigation');
-  assert.ok([...h.db.values()].some(s=>s.state==='ready'));
+  assert.ok([...h.db.values()].some(s=>s.state==='presented'),
+    'navigation cannot delete presented MP4s; backend retains them until TTL or same-camera restart');
 }
 async function noSecondNativeWhileFirstUnconfirmed(){
   const h=make();
