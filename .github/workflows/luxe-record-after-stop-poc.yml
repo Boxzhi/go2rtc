@@ -61,6 +61,20 @@ jobs:
             exit 1
           fi
           grep -Fq '三路独立录像' /tmp/luxe-poc3-ui.html
+      - name: Check embedded POC3 JavaScript syntax
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          html = Path('www/luxe-record-after-stop-poc3.html').read_text()
+          m = re.search(r'<script>(.*?)</script>', html, re.DOTALL)
+          if not m:
+              raise SystemExit('missing POC3 script')
+          Path('/tmp/luxe-poc3-inline.js').write_text(m.group(1))
+          PY
+          node --check /tmp/luxe-poc3-inline.js
+          grep -Fq '仅录制客厅固定' /tmp/luxe-poc3-ui.html
+          grep -Fq '本轮部分流启动失败' /tmp/luxe-poc3-ui.html
       - name: Package standalone HAOS local test app (not production)
         run: |
           set -eu
