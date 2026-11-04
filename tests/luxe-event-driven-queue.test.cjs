@@ -20,6 +20,14 @@ function createHarness() {
   ]);
   const sourceForID = new Map();
   const timers = [];
+  const windowEvents = new Map();
+  const documentEvents = new Map();
+  const scheduled = new Map();
+  let nextTimerId = 10;
+  let currentClock = 1_000_000;
+  class MockDate extends Date {
+    static now() { return currentClock; }
+  }
 
   function element(tag = "div") {
     return {
@@ -51,7 +59,7 @@ function createHarness() {
       if (!ids.has(id)) ids.set(id, element());
       return ids.get(id);
     },
-    addEventListener() {}
+    addEventListener(name, callback) { documentEvents.set(name, callback); }
   };
   document.getElementById("key").value = "0123456789abcdef0123456789abcdef";
 
@@ -107,18 +115,33 @@ function createHarness() {
   };
   const context = {
     document, navigator, Blob, File:MockFile, fetch:fetchMock,
-    URL, Date, console, Promise, Uint8Array, String,
+    URL, Date:MockDate, console, Promise, Uint8Array, String,
     location:{href:"https://homeassistant.test/api/hassio_ingress/token/luxe-event-driven-download-queue.html",origin:"https://homeassistant.test"},
     setInterval(fn) { timers.push(fn); return timers.length; },
     clearInterval() {},
-    setTimeout() { return 1; },
-    window:{addEventListener() {}}
+    setTimeout(fn, delay) {
+      const id=++nextTimerId;
+      if(delay<90_000)scheduled.set(id,{fn,delay});
+      return id;
+    },
+    clearTimeout(id){scheduled.delete(id);},
+    window:{addEventListener(name, callback){windowEvents.set(name, callback);}}
   };
   vm.runInNewContext(script,context,{filename:"luxe-event-driven-download-queue.html"});
   const get=id=>document.getElementById(id);
   const click=id=>get(id).click();
   const ready=source=>cameraState.set(source,"ready");
-  return {click,ready,get,nativeDownloads,shareCalls};
+  function emitWindow(name){ const fn=windowEvents.get(name); assert.ok(fn,"Missing window event listener "+name); fn(); }
+  function emitDocument(name,hidden){document.hidden=hidden;const fn=documentEvents.get(name);assert.ok(fn);fn();}
+  function advanceClock(ms){currentClock+=ms;}
+  function flushNativeReturnTimers(){
+    for(const [id,{fn,delay}] of [...scheduled.entries()]){
+      scheduled.delete(id);
+      currentClock+=delay;
+      fn();
+    }
+  }
+  return {click,ready,get,nativeDownloads,shareCalls,emitWindow,emitDocument,advanceClock,flushNativeReturnTimers};
 }
 async function settle() {
   // Yield repeatedly so simulated fetch, status and File/Blob promises settle.
@@ -154,6 +177,27 @@ async function run() {
   assert.equal(j.nativeDownloads.length,2,"third must wait while second sheet is active");
   j.click("confirm");await settle();
   assert.equal(j.nativeDownloads.length,3,"confirming second starts third exactly once");
-  console.log("PASS: native sheet overlap isolation, two-file share, explicit confirmation, delayed readiness");
+  const k=createHarness();
+  k.click("start");await settle();
+  k.ready("poc_camera_1");k.click("sync");await settle();
+  k.ready("poc_camera_2");k.ready("poc_camera_3");k.click("sync");await settle();
+  assert.equal(k.nativeDownloads.length,1,"first ready must open only first sheet");
+  k.emitWindow("focus"); await settle();
+  k.flushNativeReturnTimers(); await settle();
+  assert.equal(k.nativeDownloads.length,1,"orphan focus event must not open another native sheet");
+  k.advanceClock(2500);
+  k.emitWindow("blur");
+  k.emitWindow("focus");
+  k.flushNativeReturnTimers();await settle();
+  assert.equal(k.nativeDownloads.length,2,"paired away-return auto-advances to second native download");
+  k.emitWindow("focus");
+  k.flushNativeReturnTimers();await settle();
+  assert.equal(k.nativeDownloads.length,2,"duplicate focus must not open third sheet");
+  k.advanceClock(2500);
+  k.emitWindow("blur");k.emitWindow("focus");
+  k.flushNativeReturnTimers();await settle();
+  assert.equal(k.nativeDownloads.length,3,"second paired away-return auto-advances to third native download");
+  assert.match(k.get("queueState").textContent,/自动推断返回 2 次/);
+  console.log("PASS: sheet overlap isolation, manual fallback, two-file share, paired away-return automatic resume, orphan focus rejection");
 }
 run().catch(error=>{console.error(error);process.exitCode=1;});
