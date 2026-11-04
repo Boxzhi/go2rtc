@@ -1,4 +1,4 @@
-/* 京华府 · 三画面自适应视频墙 v1.1.1 · 视频就绪前禁用交互控制
+/* 京华府 · 三画面自适应视频墙 v1.1.2 · 视频就绪前禁用交互控制
  * - 无重叠矩形拼接；逐项比较总有效视频面积
  * - 尊重视频 videoWidth/videoHeight；object-fit:contain，绝不裁切
  * - 仅通过 absolute 位置/尺寸布局，切换排布不重建播放器
@@ -26,6 +26,7 @@
  * - 使用 go2rtc 原生 MP4 API 录像；每路独立 HTTP 流，服务端 30 分钟上限，结束后直接下载
  * - 录像图标、状态计时、停止及串行下载队列参考 Luxe EZVIZ v1.2.1
  * - v1.0.15：视频加载/重连/暂停时双重隐藏并禁用底部原生与自定义工具，首帧可播放后恢复
+ * - v1.1.2：首帧状态复核、受限播放手动恢复、连续失帧判定及连接阶段诊断
  */
 (() => {
   'use strict';
@@ -625,6 +626,8 @@
       this._tileVisible = [true,true,true];
       this._tileObserver = null;
       this._healthTimers = [null,null,null];
+      this._healthStalls = [0,0,0];
+      this._autoplayAttempts = [null,null,null];
       this._backgroundSuspendTimer = null;
       this._fadeTimers = [null,null,null];
       this._sessionTokens = [0,0,0];
@@ -686,6 +689,8 @@
       this._ratios = config.cameras.map(c => configNumber(c.aspect_ratio, 16/9, 0.2, 6));
       this._knownRatio = new Array(3).fill(false);
       this._playStates = ['idle','idle','idle'];
+      this._healthStalls = [0,0,0];
+      this._autoplayAttempts = [null,null,null];
       this._generation++;
       this._anchorTop = null;
       this._lastArrangement = null;
@@ -878,19 +883,18 @@
       return {frames,currentTime:Number(video.currentTime || 0),readyState:video.readyState,paused:video.paused};
     }
     _scheduleCameraHealthCheck(index,delay=4500) {
-      if (!this._desiredPlaying[index] || !this.isConnected || !this._pageVisible) return;
+      if (!this._desiredPlaying[index] || !this.isConnected || !this._pageVisible ||
+          this._playStates[index]!=='playing') return;
       const camera = this._cards[index];
       const video = this._videos[index] || camera?.video || camera?.shadowRoot?.querySelector('video');
       if (!camera || !video) return;
       clearTimeout(this._healthTimers[index]);
       const token = this._sessionTokens[index];
       const before = this._readVideoProgress(video);
-      if (video.paused && typeof camera.play === 'function') {
-        try { camera.play(); } catch (_) {}
-      }
       this._healthTimers[index] = setTimeout(() => {
         this._healthTimers[index] = null;
         if (!this.isConnected || !this._pageVisible || !this._desiredPlaying[index] ||
+            this._playStates[index]!=='playing' ||
             this._sessionTokens[index] !== token || this._cards[index] !== camera) return;
         const currentVideo = this._videos[index] || camera.video || camera.shadowRoot?.querySelector('video');
         const after = this._readVideoProgress(currentVideo);
@@ -901,8 +905,21 @@
           (before.frames !== null && after.frames !== null && after.frames > before.frames) ||
           after.currentTime > before.currentTime + 0.02
         ));
-        const healthy = !!(after && after.readyState >= 2 && !after.paused && frameAdvanced && !transportFailed);
-        if (!healthy) this._restartCameraAfterHealthFailure(index,'foreground-health-check');
+        const healthy = !!(after && after.readyState >= 2 && !after.paused &&
+          frameAdvanced && !transportFailed);
+        if (healthy) {
+          this._healthStalls[index]=0;
+          return;
+        }
+        // One stalled sample is not enough to tear down a healthy RTC
+        // session: 3K/HEVC frame counters and WebViews may stall briefly.
+        // A failed ICE/PC transport is definitive; restart immediately.
+        if (transportFailed || ++this._healthStalls[index]>=2) {
+          this._restartCameraAfterHealthFailure(index,
+            transportFailed?'rtc-transport-failed':'two-consecutive-stalls');
+        } else {
+          this._scheduleCameraHealthCheck(index,3500);
+        }
       },delay);
     }
     _restartCameraAfterHealthFailure(index,reason) {
@@ -947,6 +964,8 @@
       this._cards = [null,null,null];
       this._videos = [null,null,null];
       this._playStates = ['idle','idle','idle'];
+      this._healthStalls = [0,0,0];
+      this._autoplayAttempts = [null,null,null];
       if (!Array.isArray(this._recordings) || this._recordings.length!==3) this._recordings=[null,null,null];
       this._config.cameras.forEach((c,i) => {
         const tile=document.createElement('div');
@@ -1503,10 +1522,11 @@
           this._handleStartButton(index);
         });
         center.appendChild(play);
-        if (state==='error' || state==='paused') {
+        if (state==='error' || state==='paused' || state==='gesture') {
           const status=document.createElement('div');
           status.className='luxe-start-message';
-          status.textContent=state==='paused' ? '播放已暂停，点击继续' : (message||'连接失败，点击重试');
+          status.textContent=state==='paused' ? '播放已暂停，点击继续' :
+            state==='gesture' ? '浏览器需要点击继续播放' : (message||'连接失败，点击重试');
           center.appendChild(status);
         }
       }
@@ -1515,11 +1535,129 @@
     }
 
     _handleStartButton(index) {
+      if (this._playStates[index] === 'gesture' && this._cards[index]) {
+        this._resumeGesturePlayback(index);
+        return;
+      }
       if (this._playStates[index] === 'paused' && this._cards[index]) {
         this._resumeCamera(index);
         return;
       }
       this._playCamera(index);
+    }
+
+    // These are diagnostic phases, not credentials or private WebSocket URLs.
+    // The native WebRTC Camera uses HA auth/sign_path before opening /api/webrtc/ws.
+    _connectionStage(index) {
+      const camera=this._cards[index];
+      if (!camera) return customElements.get('webrtc-camera') ?
+        '播放器初始化' : '播放器组件加载';
+      const status=camera.shadowRoot?.querySelector('.mode')?.textContent?.trim().toLowerCase();
+      if (status==='error') return 'HA/视频信令';
+      const video=this._videos[index] || camera.video || camera.shadowRoot?.querySelector('video');
+      if (video?.paused && video.readyState>=2 && video.videoWidth>0)
+        return '浏览器播放限制';
+      if (video && !video.paused && video.readyState>=2 &&
+          video.videoWidth>0 && video.videoHeight>0) return '首帧状态同步';
+      if (!camera.wsURL) return 'HA 授权签名';
+      const pc=camera.pc;
+      if (pc) {
+        if (['failed','closed'].includes(pc.connectionState) ||
+            ['failed','closed'].includes(pc.iceConnectionState)) return 'RTC 传输失败';
+        if (pc.connectionState==='connected' || pc.iceConnectionState==='connected' ||
+            pc.iceConnectionState==='completed') return '等待首帧';
+        return 'RTC 协商';
+      }
+      if (camera.ws?.readyState===0) return 'WebSocket 握手';
+      if (camera.ws?.readyState===1) return 'RTC 协商准备';
+      return '视频信令建立';
+    }
+
+    // Native webrtc-camera may report a signaling error without ever
+    // dispatching an HTMLVideoElement.error. Detect that terminal state
+    // rather than displaying a misleading 45-second "connection timeout".
+    _checkCameraSignaling(index,camera,token) {
+      if (this._cards[index]!==camera || this._sessionTokens[index]!==token ||
+          this._playStates[index]!=='connecting') return;
+      const status=camera.shadowRoot?.querySelector('.mode')?.textContent?.trim().toLowerCase();
+      if (status==='error') {
+        this._failCamera(index,'视频信令失败，点击重试');
+      }
+    }
+
+    // WebRTC's VideoRTC.play() catches rejected promises internally. For
+    // muted streams with a decoded frame but a paused video, request one
+    // additional native play. If the browser requires a user gesture, show
+    // the central Play button instead of treating that as a network timeout.
+    _attemptVideoPlayback(index,camera,video,token) {
+      if (this._sessionTokens[index]!==token || this._cards[index]!==camera ||
+          this._playStates[index]!=='connecting' ||
+          !video?.paused || video.readyState<2 ||
+          !(video.videoWidth>0 && video.videoHeight>0) ||
+          this._autoplayAttempts[index]===token) return;
+      this._autoplayAttempts[index]=token;
+      const rejected=error=>{
+        if (this._sessionTokens[index]!==token || this._cards[index]!==camera ||
+            this._playStates[index]!=='connecting') return;
+        if (error?.name==='NotAllowedError') {
+          clearTimeout(this._connectTimers[index]);
+          this._connectTimers[index]=null;
+          this._playStates[index]='gesture';
+          this._showStartLayer(index,'gesture');
+        } else {
+          // AbortError is often a transient transport replacement. Don't
+          // falsely report a network failure or keep retrying every 500ms.
+          console.warn('luxe-camera-wall: 自动播放未成功',index+1,
+            String(error?.name||'PlaybackError'));
+        }
+      };
+      try {
+        video.muted=true;
+        const result=video.play();
+        if (result?.then) Promise.resolve(result).then(()=>
+          this._cameraReady(index,camera,video,token)).catch(rejected);
+        else this._cameraReady(index,camera,video,token);
+      } catch (error) { rejected(error); }
+    }
+
+    // Called synchronously from the user's tap: preserve the native user
+    // activation. Never destroy the already negotiated RTC transport.
+    _resumeGesturePlayback(index) {
+      const camera=this._cards[index];
+      const video=this._videos[index] || camera?.video || camera?.shadowRoot?.querySelector('video');
+      if (!camera || !video) {
+        this._stopCamera(index,false,true);
+        this._playCamera(index);
+        return;
+      }
+      const token=this._sessionTokens[index];
+      const rejected=error=>{
+        if (this._sessionTokens[index]!==token || this._cards[index]!==camera ||
+            this._playStates[index]!=='connecting') return;
+        if (error?.name==='NotAllowedError') {
+          clearTimeout(this._connectTimers[index]);
+          this._connectTimers[index]=null;
+          this._playStates[index]='gesture';
+          this._showStartLayer(index,'gesture');
+        } else {
+          this._failCamera(index,'无法恢复视频播放，点击重试');
+        }
+      };
+      try {
+        video.muted=true;
+        const result=video.play();
+        this._playStates[index]='connecting';
+        this._showStartLayer(index,'connecting');
+        clearTimeout(this._connectTimers[index]);
+        this._connectTimers[index]=setTimeout(()=>{
+          if (this._sessionTokens[index]===token && this._cards[index]===camera &&
+              this._playStates[index]==='connecting')
+            this._failCamera(index,'播放恢复超时（'+this._connectionStage(index)+'），点击重试');
+        },CONNECT_TIMEOUT_MS);
+        if (result?.then) Promise.resolve(result).then(()=>
+          this._cameraReady(index,camera,video,token)).catch(rejected);
+        else this._cameraReady(index,camera,video,token);
+      } catch (error) { rejected(error); }
     }
 
     // Resume an existing WebRTC session when its transport is still alive.
@@ -1554,7 +1692,7 @@
       this._connectTimers[index]=setTimeout(()=>{
         if (this._sessionTokens[index]===token && this._cards[index]===camera &&
             this._playStates[index]==='connecting')
-          this._failCamera(index,'恢复播放超时，点击重试');
+          this._failCamera(index,'恢复播放超时（'+this._connectionStage(index)+'），点击重试');
       },CONNECT_TIMEOUT_MS);
       try {
         // Match AlexxIT's own native .play action. This call remains synchronous
@@ -1579,7 +1717,7 @@
       this._showStartLayer(index,'connecting');
       this._connectTimers[index]=setTimeout(()=>{
         if (this._sessionTokens[index]===token && this._playStates[index]==='connecting')
-          this._failCamera(index,'连接超时，点击重试');
+          this._failCamera(index,'连接超时（'+this._connectionStage(index)+'），点击重试');
       },CONNECT_TIMEOUT_MS);
       try {
         // Some HA startup paths load the WebRTC custom element after this wall.
@@ -1627,11 +1765,13 @@
 
     _cameraReady(index,camera,video,token) {
       if (this._sessionTokens[index]!==token || this._cards[index]!==camera ||
-          this._playStates[index]!=='connecting' || !video || video.paused ||
+          !['connecting','gesture'].includes(this._playStates[index]) || !video || video.paused ||
           video.readyState<2 || !(video.videoWidth>0 && video.videoHeight>0)) return;
       clearTimeout(this._connectTimers[index]);
       this._connectTimers[index]=null;
       this._playStates[index]='playing';
+      this._healthStalls[index]=0;
+      this._autoplayAttempts[index]=null;
       this._syncMediaTools(index);
       const layer=this._wall?.children[index]?.querySelector('.luxe-start-layer');
       if (layer) {
@@ -1660,6 +1800,8 @@
       if (!preserveIntent) this._desiredPlaying[index]=false;
       clearTimeout(this._healthTimers[index]);
       this._healthTimers[index]=null;
+      this._healthStalls[index]=0;
+      this._autoplayAttempts[index]=null;
       clearTimeout(this._fadeTimers[index]);
       this._fadeTimers[index]=null;
       clearTimeout(this._connectTimers[index]);
@@ -1706,7 +1848,7 @@
       }
       const binding=this._videoBindings[index];
       if (binding) {
-        for (const event of ['loadedmetadata','resize','loadeddata'])
+        for (const event of ['loadedmetadata','resize','loadeddata','canplay'])
           binding.video.removeEventListener(event,binding.onDimension);
         binding.video.removeEventListener('volumechange',binding.onVolume);
         binding.video.removeEventListener('playing',binding.onReady);
@@ -1993,23 +2135,43 @@
         this._alignVolumeWithScreenshot(i);
         this._decoratePause(i,camera);
         const video=camera.video || camera.shadowRoot?.querySelector('video');
-        if (!video || this._videos[i]===video) return;
+        if (!video) {
+          this._checkCameraSignaling(i,camera,token);
+          return;
+        }
+        if (this._videos[i]===video) {
+          // Important: playing can precede valid video dimensions. A stable
+          // video element must still be checked while awaiting first frame.
+          this._videoBindings[i]?.onReady();
+          this._checkCameraSignaling(i,camera,token);
+          return;
+        }
         const previous=this._videoBindings[i];
         if (previous) {
-          for (const event of ['loadedmetadata','resize','loadeddata'])
+          for (const event of ['loadedmetadata','resize','loadeddata','canplay'])
             previous.video.removeEventListener(event,previous.onDimension);
           previous.video.removeEventListener('volumechange',previous.onVolume);
           previous.video.removeEventListener('playing',previous.onReady);
           previous.video.removeEventListener('timeupdate',previous.onReady);
+          previous.video.removeEventListener('pause',previous.onPause);
           previous.video.removeEventListener('error',previous.onError);
+          for (const event of ['enterpictureinpicture','leavepictureinpicture',
+                                'webkitpresentationmodechanged'])
+            previous.video.removeEventListener(event,previous.onPipChange);
         }
         // A new playback session must always begin muted.
         if (this._audioActive===i) this._audioActive=-1;
         video.muted=true;
         this._videos[i]=video;
-        const onDimension=()=>this._sampleRatio(i,video,generation);
         const onVolume=()=>this._audioChanged(i,video);
-        const onReady=()=>this._cameraReady(i,camera,video,token);
+        const onReady=()=>{
+          this._cameraReady(i,camera,video,token);
+          this._attemptVideoPlayback(i,camera,video,token);
+        };
+        const onDimension=()=>{
+          this._sampleRatio(i,video,generation);
+          onReady();
+        };
         const onPause=()=>{
           if (this._sessionTokens[i]!==token || this._cards[i]!==camera ||
               this._playStates[i]!=='playing' || !this._desiredPlaying[i]) return;
@@ -2030,7 +2192,7 @@
         },0);
         this._videoBindings[i]={video,onDimension,onVolume,onReady,onPause,onError,onPipChange};
         video.addEventListener('volumechange',onVolume);
-        for (const event of ['loadedmetadata','resize','loadeddata'])
+        for (const event of ['loadedmetadata','resize','loadeddata','canplay'])
           video.addEventListener(event,onDimension);
         video.addEventListener('playing',onReady);
         video.addEventListener('timeupdate',onReady);
