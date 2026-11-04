@@ -14,6 +14,7 @@
     return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');
   };
   const css=[
+    'ha-card { position:relative; }',
     '.tile.luxe-rc-ready .luxe-media-record { opacity:1!important; visibility:visible!important;pointer-events:auto!important;color:#a8e0ff; }',
     '.tile.luxe-rc-ready .luxe-media-snapshot { display:none; }',
     '.luxe-rc-confirm {border:0;background:rgba(20,80,99,.9);color:white;border-radius:7px;font-size:12px;min-width:44px;min-height:27px;padding:4px 6px;cursor:pointer;}',
@@ -292,8 +293,12 @@
         // to infer native sheet closure.
         const earliest=Math.min(...candidates.map(s=>Date.parse(s.ready_at)));
         const wait=Math.max(0,2000-(Date.now()-earliest));
-        this._rcCoalesceTimer=setTimeout(()=>{
+        this._rcCoalesceTimer=setTimeout(async()=>{
           this._rcCoalesceTimer=null;
+          if(this._rcAutoDone||!this.isConnected)return;
+          // Server readiness is authoritative: re-query at the edge of the
+          // coalescing window before opening any native download sheet.
+          await this._rcRefresh();
           if(this._rcAutoDone||!this.isConnected)return;
           const ready=this._recordings.filter(s=>valid(s)&&s.group===this._rcGroup);
           if(!ready.length)return;
