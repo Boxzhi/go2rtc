@@ -143,7 +143,7 @@ function draw(){
   updateShareButton();
 }
 function updateShareButton(){
-  const ready=readySessions();
+  const ready=readySessions().filter(s=>!pendingConfirm.has(s.id));
   const eligible=ready.filter(s=>s.group===currentGroup);
   const options=eligible.length>=2?eligible:ready;
   const signature=options.map(s=>s.id).join("|");
