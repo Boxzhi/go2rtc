@@ -48,6 +48,46 @@
 - Verified successful HEVC/Opus and HEVC/FLAC MP4 with audio, duration and seekability on stock Home Assistant iOS App.
 - Test-install procedure must have rollback to the prior `1.9.15-luxe.1` production addon and no production mutation.
 
+## Implemented as the first independent RC build
+
+The backend test module now exists in `internal/luxerecord` and is disabled unless explicitly enabled with `luxe_recording.enabled: true`. Compared with early POC.3 it adds:
+
+- Up to three simultaneous recorded MP4 streams with audio; 3–1800 seconds per recording; per-file size bounded to 1 GiB; total 3 GiB active reservation + completed bytes budget, with a separate 1 GiB HAOS free disk reserve.
+- Ready timestamp starts an independent **exact 15-minute capability validity window**. Every API request prunes expired sessions; the background janitor deletes physical files on a 10-second interval.
+- Stable per-file MP4 and JSON manifest on the **test App's** persistent /data partition, restored after test App restart if and only if the recording was completely finalized and has not expired.
+- Authorization header and expiring per-video download capability, native WKDownload attachment and HTTP Range support, user-declared "saved/discard" endpoint that removes one cache file.
+- Small-file Web Share and 2-second per-group coalescing in the **test UI**; a completed first camera is otherwise downloaded natively without waiting for the other cameras, and subsequent cameras expose individual Save buttons.
+
+**Status and boundaries**: CI-Go tests, JS syntax and built-in HTTP page checks are possible without iPhone; they are **not** substitutes for a three-camera official Home Assistant iOS App test. The production camera wall JS has not yet been replaced: the test App supplies an isolated test UI at Ingress. The old `luxe/hlc7` running App must remain unchanged.
+
+### Install isolated HAOS recording candidate
+
+1. Download the most recent **successful** Actions artifact on branch `feat/luxe-xiaomi-recording-release-candidate` and extract the inner file `luxe-xiaomi-recording-rc-local-app-amd64.tar.gz`.
+2. Upload the inner tar.gz to Home Assistant's `/config/www/` via the available upload method.
+3. In the HA Terminal & SSH App run:
+
+   ```bash
+   tar -xzf /config/www/luxe-xiaomi-recording-rc-local-app-amd64.tar.gz -C /addons/local/
+   ls -lah /addons/local/luxe_xiaomi_record_rc/
+   ```
+
+4. Settings → Apps → Install App → Check updates. Install the **new** `Luxe Xiaomi Camera Recording RC`, slug `luxe_xiaomi_record_rc`. This is a different App from `fee2ccf4_luxe_go2rtc`.
+5. Confirm the three prefilled RTSP restream URLs point to the already-running production go2rtc. Set a dedicated 24+ character secret, save and start **only** the new RC App. Do not share the key or its unredacted log.
+6. In the stock Home Assistant iOS App, open the new RC App's Ingress UI. Enter the same test key. Select 10 seconds and start three streams concurrently; check independent MP4 readiness, 2-second share coalescing, the original WKDownload sheet, and each per-camera "Save" button.
+7. A green "Save" state remains until the user explicitly selects **确认已保存** (or **放弃**), or 15 minutes elapse. Closing a native sheet must **not** delete the source recording automatically. A 30-minute duration is **enabled in the server**, but remains a stress/space test requiring real-device acceptance before production deployment.
+8. After the RC test, stop/uninstall **only** the RC App to roll back. The existing production HLC7 App remains running and unmodified.
+
+**Potential storage tradeoff:** the recordings are not saved in a permanent NAS library, but during the up-to-15-minute cache they physically occupy temporary HAOS App storage (the VM is hosted on NAS). Completing a recording requires temporary disk space; one cannot deliver a server-side finalized large MP4 without temporary bytes somewhere.
+
+### Actual test API
+
+- `POST api/luxe/recordings/start` with JSON {source,group,duration_seconds}
+- `GET api/luxe/recordings/` restores recordings from server metadata
+- `GET api/luxe/recordings/status/{id}` gets individual status and expiration
+- `POST api/luxe/recordings/stop/{id}` finalizes the selected camera
+- `GET api/luxe/recordings/file/{id}?token=...` native attachment and Range
+- `POST api/luxe/recordings/ack/{id}` with {action:"saved"} or {action:"discard"} — explicit user assertion
+
 ## Delivery gates
 
 1. New standalone **integrated feature branch** from `luxe/hlc7` (not previous POC branches).
