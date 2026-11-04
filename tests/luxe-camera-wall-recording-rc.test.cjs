@@ -172,7 +172,7 @@ async function staggered(){
   assert.ok([...h.db.values()].some(s=>s.state==='presented'),
     'navigation cannot delete presented MP4s; backend retains them until TTL or same-camera restart');
 }
-async function noSecondNativeWhileFirstUnconfirmed(){
+async function explicitNewRecordingCanAutoDownload(){
   const h=make();
   await h.card._startRecording(0);
   h.complete(0);
@@ -184,8 +184,10 @@ async function noSecondNativeWhileFirstUnconfirmed(){
   h.complete(1);
   await h.card._rcRefresh();await settle();
   h.advance(2600);await settle();
-  assert.equal(h.native.length,1,'second recording must not interrupt an unacknowledged native download');
-  assert.equal(h.card._recordings[1].state,'ready','later recording must remain saveable');
+  assert.equal(h.native.length,2,
+    'after explicitly beginning a new recording group, its first completed file may auto-download');
+  assert.equal(h.card._recordings[1],null,
+    'after the second native download, record icon must reset automatically');
 }
 async function localAddonSlugRegression(){
   const variants=[
@@ -206,7 +208,7 @@ async function localAddonSlugRegression(){
   }
 }
 async function test(){
- await localAddonSlugRegression();await closeGroup();await staggered();await noSecondNativeWhileFirstUnconfirmed();
- console.log('PASS: RC subclass 3-video coalescing, record icon reset on native/share opening, new recording purges old MP4, no overlapping native sheets, remaining-two share, navigation independence, full local Supervisor slug');
+ await localAddonSlugRegression();await closeGroup();await staggered();await explicitNewRecordingCanAutoDownload();
+ console.log('PASS: RC subclass 3-video coalescing, record icon reset on native/share opening, new recording purges old MP4, single native popup per group, explicit new recording permits new download, remaining-two share, navigation independence, full local Supervisor slug');
 }
 test().catch(e=>{console.error(e);process.exitCode=1;});
