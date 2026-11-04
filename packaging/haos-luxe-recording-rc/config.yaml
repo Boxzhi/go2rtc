@@ -1,0 +1,28 @@
+name: "Luxe Xiaomi Camera Recording RC"
+slug: "luxe_xiaomi_record_rc"
+version: "1.9.15-luxe.record-rc4"
+description: "Isolated feature-candidate build using production HLC7 and 15-minute temporary recording cache"
+stage: experimental
+url: "https://github.com/Boxzhi/go2rtc/tree/feat/luxe-xiaomi-recording-release-candidate"
+arch:
+  - amd64
+startup: application
+boot: manual
+init: false
+ingress: true
+ingress_port: 1984
+ingress_entry: "luxe-xiaomi-recorder-rc.html"
+panel_title: "Luxe 录像 RC"
+panel_icon: "mdi:video"
+panel_admin: true
+options:
+  source_1: "rtsp://fee2ccf4-luxe-go2rtc:8554/jinghuafu_keting_ptz_3k"
+  source_2: "rtsp://fee2ccf4-luxe-go2rtc:8554/jinghuafu_keting_fixed_3k"
+  source_3: "rtsp://fee2ccf4-luxe-go2rtc:8554/jinghuafu_canting_2k"
+  secret: ""
+schema:
+  source_1: str
+  source_2: str
+  source_3: str
+  secret: password
+backup: cold
