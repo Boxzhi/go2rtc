@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Luxe · Event-driven Recording Queue POC</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:light dark}
+body{max-width:700px;margin:auto;padding:18px 15px 40px;line-height:1.52}
+h1{font-size:22px;margin:3px 0 8px}h2{font-size:17px;margin:0 0 12px}
+section{padding:15px;border:1px solid #8c9aa366;border-radius:14px;margin:14px 0}
+label{font-size:14px;font-weight:650;display:block;margin-bottom:7px}
+input{width:100%;box-sizing:border-box;padding:11px;font-size:16px;color:inherit;background:transparent;border:1px solid #91a0ac80;border-radius:10px}
+button{padding:12px 13px;font:650 15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#2467b9;color:white;border:0;border-radius:10px;min-height:44px;margin:7px 5px 0 0}
+button:disabled{opacity:.45}button.gray{background:#61738a}button.teal{background:#087f90}button.block{display:block;width:100%}
+p,small{color:#84919c}p{margin:10px 0}
+.note{padding:10px;border-left:3px solid #e8aa3c;font-size:13px}
+.item{display:flex;gap:12px;justify-content:space-between;align-items:center;padding:12px;background:#8695a51a;border-radius:10px;margin:8px 0}
+.item .info{flex:1;min-width:0}.item strong,.item small{display:block}
+.item .status{font-size:12px;color:#628bc8}
+#summary{font-weight:700;margin:10px 0}
+#log{white-space:pre-wrap;overflow-wrap:anywhere;background:#8393a51f;border-radius:10px;padding:12px;max-height:240px;overflow:auto;font:12px/1.5 ui-monospace,Menlo,monospace}
+</style>
+</head>
+<body>
+<h1>Luxe · 三路录像事件下载队列</h1>
+<p>谁先录制完成就立即进入原生下载；其余继续录制。即使第一个 WKDownload 弹窗还开着，第二、第三路也只排队、不覆盖弹窗。官方 HA App 不做修改。</p>
+<p class="note">本次验证仅执行一次：三路分别 10、12、14 秒，以制造弹窗重叠场景。进入 iOS 原生下载/保存界面后，请保持弹窗打开，观察其他录像是否完成；返回页面后再继续。网页无法检测原生「保存完成」，所有确认按钮都代表你亲自确认。</p>
+<section>
+<h2>录像设置</h2>
+<label for="key">测试 App 的独立密钥</label>
+<input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="与安装配置中的 secret 相同">
+<p>客厅移动：10 秒 · 客厅固定：12 秒 · 餐厅：14 秒</p>
+<button id="start" class="block">同时开始三路录像</button>
+<button id="sync" class="gray block" disabled>重新同步服务器录像状态</button>
+</section>
+<section>
+<h2>三路独立状态</h2>
+<div id="rows"></div>
+<div id="summary">尚未开始</div>
+</section>
+<section>
+<h2>原生下载／合并保存队列</h2>
+<p>第一个文件立即自动进入 WKDownload。此后用户保存并关闭弹窗，再通过下方按钮继续；若剩余两份录像均就绪且足够小，可以一次分享剩余两份。</p>
+<div id="queueState">尚无待下载录像</div>
+<button id="retry" class="gray" disabled>重试当前文件下载</button>
+<button id="confirm" class="block" disabled>我已保存当前视频，继续下载下一路</button>
+<button id="shareRest" class="teal block" disabled>我已保存当前视频，一次分享剩余两份</button>
+<button id="finishShare" class="teal block" disabled>我已确认剩余文件全部保存</button>
+<div id="moreInfo" class="note" style="margin-top:12px">不会在原生下载弹窗未确认关闭时自动拉起第二个 WKDownload。</div>
+</section>
+<section>
+<h2>调试日志</h2>
+<div id="log"></div>
+</section>
+<script>
+(()=>{
+"use strict";
+const $=id=>document.getElementById(id);
+const cameras=[
+ {key:"poc_camera_1",label:"客厅移动",seconds:10},
+ {key:"poc_camera_2",label:"客厅固定",seconds:12},
+ {key:"poc_camera_3",label:"餐厅",seconds:14}
+];
+const API=new URL("./api/luxe/poc3/",location.href);
+const MiB=1048576;
+const BATCH_FILE_CAP=16*MiB;
+const BATCH_TOTAL_CAP=32*MiB;
+const OVERALL_WATCHDOG_MS=90000;
+let recordMap=new Map(),failMap=new Map(),readyQueue=[],seenReady=new Set(),saved=new Set();
+let active=null,batchShare=null,prepared=null,batchPreparing=false;
+let starting=false,pollBusy=false,pollHandle=null,startedAt=0,startResolved=0,groupStarted=false;
+let syncErrorCount=0;
+function log(message){
+ $("log").textContent+="["+new Date().toLocaleTimeString()+"] "+message+"\n";
+ $("log").scrollTop=$("log").scrollHeight;
+}
+function summary(message){$("summary").textContent=message;log(message);}
+function headers(json){
+ const h={"X-Luxe-POC-Key":$("key").value.trim()};
+ if(json)h["Content-Type"]="application/json";
+ return h;
+}
+async function request(route,options={}){
+ const response=await fetch(new URL(route,API),{cache:"no-store",...options});
+ const data=await response.json().catch(()=>({error:"无法解析服务端响应"}));
+ if(!response.ok)throw Error(data.error||"HTTP "+response.status);
+ return data;
+}
+function labelFor(rec){return cameras.find(c=>c.key===rec.source)?.label||rec.source;}
+function allStartsResolved(){return startResolved===cameras.length;}
+function allSessionsTerminal(){
+ return allStartsResolved()&&recordMap.size+failMap.size===cameras.length&&
+  [...recordMap.values()].every(r=>r.state==="ready"||r.state==="failed");
+}
+function displayRows(){
+ const box=$("rows");box.replaceChildren();
+ for(const cam of cameras){
+  const rec=recordMap.get(cam.key),err=failMap.get(cam.key);
+  const row=document.createElement("div");row.className="item";
+  const main=document.createElement("div");main.className="info";
+  const name=document.createElement("strong");name.textContent=cam.label+" · "+cam.seconds+"秒";
+  const detail=document.createElement("small");
+  detail.textContent=err?"失败："+err:rec?
+    rec.state+" · "+(rec.bytes/MiB).toFixed(2)+" MiB · "+(rec.video_codec||"")+"/"+(rec.audio_codec||"无"):
+    groupStarted?"等待建立会话":"未开始";
+  const tag=document.createElement("span");tag.className="status";
+  tag.textContent=err?"failed":rec?rec.state:"pending";
+  main.append(name,detail);row.append(main,tag);box.append(row);
+ }
+}
+function showQueue(){
+ const waiting=readyQueue.length;
+ const complete=saved.size;
+ let text;
+ if(batchShare){
+  text="剩余 "+batchShare.items.length+" 份已发起系统分享；请先在系统面板保存并关闭。";
+ }else if(active){
+  text="当前原生下载："+labelFor(active)+
+   "。另有 "+waiting+" 份已完成录像排队。已确认保存 "+complete+" 份。";
+ }else if(waiting){
+  text="当前无原生下载弹窗，已有 "+waiting+" 份待保存录像。";
+ }else text="待保存队列为空；已确认保存 "+complete+" 份。";
+ $("queueState").textContent=text;
+ $("retry").disabled=!active||!!batchShare;
+ $("confirm").disabled=!active||!!batchShare;
+ $("shareRest").disabled=!!batchShare||!prepared||readyQueue.length!==prepared.items.length||
+  (active===null&&readyQueue.length===0);
+ $("shareRest").textContent=active?
+  "我已保存当前视频，一次分享剩余 "+readyQueue.length+" 份":
+  "一次分享剩余 "+readyQueue.length+" 份";
+ $("finishShare").disabled=!batchShare||batchShare.status!=="returned";
+ $("moreInfo").textContent=batchShare?
+  "分享面板返回不等于已经保存。确认已在「文件」App 看到这批文件后，再点击“我已确认剩余文件全部保存”。":
+  prepared?"剩余 "+prepared.items.length+" 份已完整加载，并可使用系统一次分享。":
+  batchPreparing?"正在准备剩余 MP4 的多文件分享数据……":
+  waiting>=2?"如果剩余两份均就绪，页面将尝试预备一次分享。大文件则保持逐个原生下载。":
+  "如果另一条录像在原生弹窗打开期间结束，只入队；关闭弹窗并返回页面后可继续。";
+ $("start").disabled=starting||!!active||!!batchShare||waiting>0||!allSessionsTerminal()&&groupStarted;
+ $("sync").disabled=!groupStarted;
+}
+function clickDownload(rec,retry=false){
+ if(batchShare) return;
+ const url=new URL(rec.download_url,location.href);
+ if(url.origin!==location.origin)throw Error("拒绝跨源下载链接");
+ const a=document.createElement("a");
+ a.href=url.href;a.download=rec.filename;a.style.display="none";
+ document.body.appendChild(a);
+ try{
+  a.click();
+  active=rec;
+  log((retry?"重试":"已请求")+"原生 WKDownload："+labelFor(rec)+"，其余任务不会覆盖此弹窗");
+ }finally{a.remove();}
+ showQueue();
+}
+function maybeStartNext(){
+ // Strictly at most one native download at a time. An open share sheet also
+ // blocks the native download slot. The first ready file is automatic.
+ if(active||batchShare||!readyQueue.length)return;
+ // If two already wait and have been preloaded as one share set, leave the
+ // combined-share option available; never initiate a second WKDownload by timer.
+ if(readyQueue.length>=2&&prepared)return;
+ const rec=readyQueue.shift();
+ try{clickDownload(rec);}catch(err){readyQueue.unshift(rec);log("启动下载失败："+String(err));}
+ showQueue();
+}
+function storeReady(rec){
+ if(rec.state!=="ready"||!rec.download_url||seenReady.has(rec.id))return;
+ seenReady.add(rec.id);
+ readyQueue.push(rec);
+ log(labelFor(rec)+" MP4 完整封装：ready ("+(rec.bytes/MiB).toFixed(2)+" MiB)，已入队");
+ maybeStartNext();
+ void prepareTwo();
+}
+async function prepareTwo(){
+ if(batchPreparing||batchShare||readyQueue.length<2)return;
+ const items=readyQueue.slice(0,2);
+ const ids=items.map(r=>r.id).join("|");
+ if(prepared&&prepared.ids===ids)return;
+ prepared=null;batchPreparing=true;showQueue();
+ try{
+  const total=items.reduce((v,r)=>v+Number(r.bytes),0);
+  if(items.some(r=>r.bytes<1024||r.bytes>BATCH_FILE_CAP)||total>BATCH_TOTAL_CAP){
+   log("剩余 MP4 超过本次多文件分享内存保护阈值，改为逐个 WKDownload");
+   return;
+  }
+  const files=[];
+  for(const rec of items){
+   const u=new URL(rec.download_url,location.href);
+   if(u.origin!==location.origin)throw Error("文件 URL 非同源");
+   const result=await fetch(u.href,{cache:"no-store"});
+   if(!result.ok)throw Error("读取 "+labelFor(rec)+" 失败，HTTP "+result.status);
+   const blob=await result.blob();
+   if(blob.size!==rec.bytes||blob.size<1024||blob.size>BATCH_FILE_CAP)
+    throw Error("文件长度校验失败："+labelFor(rec));
+   const header=new Uint8Array(await blob.slice(4,8).arrayBuffer());
+   if(String.fromCharCode(...header)!=="ftyp")throw Error("MP4 文件头检查失败："+labelFor(rec));
+   files.push(new File([blob],rec.filename,{type:"video/mp4"}));
+  }
+  if(typeof navigator.share!=="function"||typeof navigator.canShare!=="function"||
+     !navigator.canShare({files}))throw Error("HA App 当前不接受批量分享这些 MP4");
+  // A later status update may have changed the queue while files were fetched.
+  if(readyQueue.slice(0,2).map(r=>r.id).join("|")!==ids)return;
+  prepared={ids,items,files};
+  log("另外两路已准备好一次系统分享；只需用户操作，不会自动打开第二弹窗");
+ }catch(err){
+  log("多文件准备未成功（仍可单独下载）："+String(err));
+ }finally{batchPreparing=false;showQueue();}
+}
+async function sync(){
+ if(pollBusy||!groupStarted)return;
+ pollBusy=true;
+ try{
+  const pairs=[...recordMap.entries()];
+  const results=await Promise.allSettled(pairs.map(([key,r])=>
+   request("status/"+encodeURIComponent(r.id),{headers:headers()})));
+  let errors=0;
+  for(let i=0;i<pairs.length;i++){
+   const [key,old]=pairs[i], result=results[i];
+   if(result.status!=="fulfilled"){errors++;continue;}
+   const fresh=result.value;
+   recordMap.set(key,fresh);
+   if(fresh.state!==old.state) log(labelFor(fresh)+" 状态："+old.state+" → "+fresh.state);
+   if(fresh.state==="failed")failMap.set(key,fresh.message||"录制失败");
+   if(fresh.state==="ready")storeReady(fresh);
+  }
+  if(errors>0){
+   syncErrorCount+=errors;
+   if(syncErrorCount<=3)log("部分状态查询失败，可点击“重新同步”重试");
+  }
+  if(allSessionsTerminal()){
+   if(pollHandle!==null){clearInterval(pollHandle);pollHandle=null;}
+   const count=[...recordMap.values()].filter(r=>r.state==="ready").length;
+   if(failMap.size) summary("本轮 "+count+"/3 路录制成功；成功文件仍可继续保存。");
+   else summary("三路 MP4 已全部完成；下载与分享队列继续独立处理。");
+  }
+  displayRows();showQueue();
+ }finally{pollBusy=false;}
+}
+async function start(){
+ if(starting||active||readyQueue.length||batchShare)return;
+ if($("key").value.trim().length<24){summary("请填写至少 24 字符的测试密钥");return;}
+ recordMap=new Map();failMap=new Map();readyQueue=[];seenReady=new Set();saved=new Set();
+ prepared=null;batchPreparing=false;active=null;batchShare=null;
+ groupStarted=true;starting=true;startResolved=0;syncErrorCount=0;startedAt=Date.now();
+ if(pollHandle!==null)clearInterval(pollHandle);
+ displayRows();showQueue();
+ summary("三路开始并发建立录像；完成时间分别设为 10/12/14 秒");
+ pollHandle=setInterval(()=>void sync(),800);
+ const jobs=cameras.map(async cam=>{
+  try{
+   const rec=await request("start",{
+    method:"POST",headers:headers(true),
+    body:JSON.stringify({source:cam.key,duration_seconds:cam.seconds})
+   });
+   recordMap.set(cam.key,rec);
+   log(cam.label+" 已建立录制会话；等待 "+cam.seconds+" 秒后封装");
+  }catch(err){
+   failMap.set(cam.key,String(err));log(cam.label+" 启动失败："+String(err));
+  }finally{
+   startResolved++;displayRows();showQueue();void sync();
+  }
+ });
+ await Promise.allSettled(jobs);
+ starting=false;showQueue();
+ // A hung producer must not leave the group in a permanent "recording" state.
+ setTimeout(()=>{
+  if(groupStarted&&!allSessionsTerminal()&&Date.now()-startedAt>=OVERALL_WATCHDOG_MS){
+   summary("90 秒监控超时：未完成的录像不会作为完整 MP4 分享，可继续手动同步");
+   if(pollHandle!==null){clearInterval(pollHandle);pollHandle=null;}
+   showQueue();
+  }
+ },OVERALL_WATCHDOG_MS);
+}
+function confirmCurrentAndContinue(){
+ if(!active)return;
+ saved.add(active.id);
+ log("用户声明已保存 "+labelFor(active)+"；此处不是原生 iOS 保存回调");
+ active=null;
+ // If two are queued, do not auto-start one until the user makes a choice.
+ // An explicit click on this button chooses native one-by-one downloads.
+ if(readyQueue.length){
+  const next=readyQueue.shift();
+  try{clickDownload(next);}catch(err){readyQueue.unshift(next);log("继续下载失败："+String(err));}
+ }else log("暂无下一份就绪录像；后续录制完成时将自动启动下一份下载");
+ prepared=null;showQueue();
+}
+function onShare(){
+ if(batchShare||!prepared||prepared.items.length<2)return;
+ if(prepared.ids!==readyQueue.slice(0,2).map(r=>r.id).join("|"))return;
+ const bundle=prepared;
+ if(active){
+  saved.add(active.id);
+  log("用户确认前一份已保存，即将一次分享其余两份");
+  active=null;
+ }
+ const selection=new Set(bundle.items.map(r=>r.id));
+ readyQueue=readyQueue.filter(r=>!selection.has(r.id));
+ batchShare={items:bundle.items,status:"open"};
+ prepared=null;
+ showQueue();
+ try{
+  // Preserve user activation: navigator.share is invoked synchronously on click.
+  const result=navigator.share({files:bundle.files});
+  log("一次分享剩余 "+bundle.items.length+" 份真实 MP4：系统面板已调用");
+  Promise.resolve(result).then(()=>{
+   if(batchShare){batchShare.status="returned";showQueue();}
+   log("系统分享面板返回，仍需人工确认「文件」App 中实际保存的文件");
+  },err=>{
+   readyQueue=bundle.items.concat(readyQueue);
+   batchShare=null;
+   log("分享被取消或失败："+String(err)+"；两份文件重新入队");
+   showQueue();
+   void prepareTwo();
+  });
+ }catch(err){
+  readyQueue=bundle.items.concat(readyQueue);
+  batchShare=null;
+  log("启动多文件分享失败："+String(err));
+  showQueue();
+  void prepareTwo();
+ }
+}
+function confirmShare(){
+ if(!batchShare||batchShare.status!=="returned")return;
+ for(const r of batchShare.items) saved.add(r.id);
+ log("用户确认批量分享的 "+batchShare.items.length+" 份视频已保存到 iPhone");
+ batchShare=null;prepared=null;showQueue();
+ if(!readyQueue.length)summary("本轮保存流程已完成；请在 iPhone「文件」App 核对三个独立视频");
+ else maybeStartNext();
+}
+$("start").addEventListener("click",()=>void start());
+$("sync").addEventListener("click",()=>void sync());
+$("retry").addEventListener("click",()=>{
+ if(active){try{clickDownload(active,true);}catch(err){log("重试失败："+String(err));}}
+});
+$("confirm").addEventListener("click",confirmCurrentAndContinue);
+$("shareRest").addEventListener("click",onShare);
+$("finishShare").addEventListener("click",confirmShare);
+document.addEventListener("visibilitychange",()=>{
+ if(!document.hidden){log("页面恢复可见，重新同步录像完成状态");void sync();}
+});
+window.addEventListener("pageshow",()=>{if(groupStarted)void sync();});
+window.addEventListener("focus",()=>{if(groupStarted)void sync();});
+displayRows();showQueue();
+log("混合下载队列 POC 已加载：ready 事件优先，原生 Sheet 单实例；从不自动覆盖弹窗");
+})();
+</script>
+</body>
+</html>
