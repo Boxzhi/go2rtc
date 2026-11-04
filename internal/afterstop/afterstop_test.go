@@ -29,7 +29,7 @@ func TestSessionViewReadyOnly(t *testing.T) {
 
 func TestAuthorize(t *testing.T) {
 	m:=&manager{secret:strings.Repeat("a",32)}
-	r:=httptest.NewRequest(http.MethodPost,"/api/luxe/poc3/start",nil)
+	r:=httptest.NewRequest(http.MethodPost,"/api/luxe/poc4/start",nil)
 	if m.authorized(r) {t.Fatal("no key should be denied")}
 	r.Header.Set("X-Luxe-POC-Key",strings.Repeat("b",32))
 	if m.authorized(r) {t.Fatal("wrong key should be denied")}
@@ -46,14 +46,14 @@ func TestDownloadCapabilityAndRange(t *testing.T) {
 		"abc":{id:"abc",token:"secret123",state:"ready",path:path,filename:"record.mp4",expires:time.Now().Add(time.Minute)},
 	}}
 	wrong:=httptest.NewRecorder()
-	m.handle(wrong,httptest.NewRequest(http.MethodGet,"/api/luxe/poc3/download/abc?token=wrong",nil))
+	m.handle(wrong,httptest.NewRequest(http.MethodGet,"/api/luxe/poc4/download/abc?token=wrong",nil))
 	if wrong.Code!=http.StatusNotFound {t.Fatalf("wrong token: %d",wrong.Code)}
 	get:=httptest.NewRecorder()
-	m.handle(get,httptest.NewRequest(http.MethodGet,"/api/luxe/poc3/download/abc?token=secret123",nil))
+	m.handle(get,httptest.NewRequest(http.MethodGet,"/api/luxe/poc4/download/abc?token=secret123",nil))
 	if get.Code!=http.StatusOK {t.Fatalf("download: %d body=%s",get.Code,get.Body)}
 	if !bytes.Equal(get.Body.Bytes(),content) {t.Fatal("bad data")}
 	if !strings.Contains(get.Header().Get("Content-Disposition"),"attachment") {t.Fatal("missing attachment header")}
-	r:=httptest.NewRequest(http.MethodGet,"/api/luxe/poc3/download/abc?token=secret123",nil)
+	r:=httptest.NewRequest(http.MethodGet,"/api/luxe/poc4/download/abc?token=secret123",nil)
 	r.Header.Set("Range","bytes=0-3")
 	rangeResponse:=httptest.NewRecorder()
 	m.handle(rangeResponse,r)
@@ -83,4 +83,48 @@ func TestThreeRecordingSlots(t *testing.T) {
 	if len(m.activeIDs)<maxActive {t.Fatal("fourth recording unexpectedly allowed")}
 	delete(m.activeIDs,"poc_camera_2")
 	if len(m.activeIDs)>=maxActive {t.Fatal("released recording slot not available")}
+}
+
+func TestPOC4TemporarySpaceGuard(t *testing.T) {
+	testCases := []struct {
+		name string
+		committed int64
+		active int
+		free uint64
+		want bool
+	}{
+		{"three-reservations-with-headroom",0,3,uint64(3*maxBytes+minDiskReserve),true},
+		{"insufficient-free-space",0,3,uint64(3*maxBytes+minDiskReserve-1),false},
+		{"over-total-budget",maxTotalBudget-3*maxBytes+1,3,uint64(maxTotalBudget+minDiskReserve),false},
+		{"one-reservation",0,1,uint64(maxBytes+minDiskReserve),true},
+		{"too-many-recorders",0,maxActive+1,uint64(maxTotalBudget+minDiskReserve),false},
+	}
+	for _,tc := range testCases {
+		t.Run(tc.name,func(t *testing.T){
+			got:=hasTemporarySpace(tc.committed,tc.active,tc.free)
+			if got!=tc.want {t.Fatalf("got=%v want=%v",got,tc.want)}
+		})
+	}
+}
+
+func TestPOC4EarlyTermination(t *testing.T) {
+	tests:=[]struct{
+		name string
+		elapsed time.Duration
+		requested time.Duration
+		manual bool
+		want bool
+	}{
+		{"remote-disconnect",40*time.Second,60*time.Second,false,true},
+		{"normal-timeout",59*time.Second,60*time.Second,false,false},
+		{"manual-stop",20*time.Second,300*time.Second,true,false},
+		{"short-video-early",2*time.Second,10*time.Second,false,true},
+	}
+	for _,tt:=range tests {
+		t.Run(tt.name,func(t *testing.T){
+			if got:=recordingEndedEarly(tt.elapsed,tt.requested,tt.manual);got!=tt.want {
+				t.Fatalf("early=%v want=%v",got,tt.want)
+			}
+		})
+	}
 }
