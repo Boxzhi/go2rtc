@@ -163,8 +163,14 @@
           const secure=location.protocol==='https:'?';Secure':'';
           document.cookie='ingress_session='+session.session+
             ';path=/api/hassio_ingress/;SameSite=Strict'+secure;
+          // Supervisor's ingress_url includes ingress_entry (our HTML
+          // page), so never append API routes to the entire ingress_url.
+          // Extract /api/hassio_ingress/<token>/ as the backend root.
           const root=new URL(raw.ingress_url,location.origin);
-          return location.origin+root.pathname.replace(/\/+$/,'')+'/';
+          if(root.origin!==location.origin)throw Error('RC Ingress 地址不是当前 HA 同源地址');
+          const mount=root.pathname.match(/^\/api\/hassio_ingress\/[^/]+(?=\/|$)/)?.[0];
+          if(!mount)throw Error('无法识别 RC Ingress 根路径');
+          return location.origin+mount+'/';
         })().catch(e=>{this._rcIngressPromise=null;throw e;});
         return this._rcIngressPromise;
       }
@@ -179,8 +185,18 @@
           ...(payload!==undefined?{body:JSON.stringify(payload)}:{}),
         });
         if(response.status===204)return null;
-        const data=await response.json().catch(()=>({error:'服务器响应不是 JSON'}));
-        if(!response.ok)throw Error(data.error||'HTTP '+response.status);
+        let data;
+        try{
+          data=await response.json();
+        }catch(_){
+          // Do not print URLs, ingress session tokens, the secret or
+          // arbitrary HTML returned by a broken proxy/login redirect.
+          const contentType=response.headers?.get?.('content-type')?.split(';')[0]||'未知类型';
+          throw Error('录像 API 返回非 JSON（HTTP '+response.status+
+            '，'+contentType+'）。请检查 RC Ingress 会话及代理路径');
+        }
+        if(!response.ok)throw Error(data?.error||'录像 API HTTP '+response.status);
+        if(!data||typeof data!=='object')throw Error('录像 API 数据结构异常');
         return data;
       }
       _rcSource(index){
