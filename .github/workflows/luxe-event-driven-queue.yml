@@ -1,0 +1,95 @@
+name: Luxe Event Driven Recording Download Queue - Isolated POC
+
+on:
+  push:
+    branches:
+      - feat/luxe-event-driven-download-queue
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout isolated branch
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+      - name: Run codec and recording tests
+        run: go test -count=1 ./pkg/h265 ./pkg/iso ./pkg/mp4 ./pkg/xiaomi/miss/... ./internal/mp4 ./internal/afterstop
+      - name: Build all go2rtc packages
+        run: go build ./...
+      - name: Build Linux AMD64 standalone POC executable
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w" -o dist/go2rtc-event-download-queue-poc-amd64 .
+          sha256sum dist/go2rtc-event-download-queue-poc-amd64 > dist/SHA256SUMS.txt
+      - name: Verify embedded JavaScript and native download overlap behavior
+        run: |
+          set -eu
+          bash -n packaging/haos-local-event-queue/run.sh
+          grep -Fx 'ingress_entry: "luxe-event-driven-download-queue.html"' packaging/haos-local-event-queue/config.yaml
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          html=Path('www/luxe-event-driven-download-queue.html').read_text()
+          m=re.search(r'<script>(.*?)</script>',html,re.DOTALL)
+          assert m,'missing JS block'
+          Path('/tmp/event-queue-inline.js').write_text(m.group(1))
+          PY
+          node --check /tmp/event-queue-inline.js
+          node tests/luxe-event-driven-queue.test.cjs
+      - name: Smoke test test-App ingress page
+        run: |
+          set -eu
+          cat >/tmp/luxe-event-queue-smoke.yaml <<'EOF'
+          app:
+            modules:
+              - api
+          api:
+            listen: "127.0.0.1:1984"
+          EOF
+          ./dist/go2rtc-event-download-queue-poc-amd64 -c /tmp/luxe-event-queue-smoke.yaml >/tmp/luxe-event-queue-smoke.log 2>&1 &
+          service_pid=$!
+          trap 'kill "$service_pid" 2>/dev/null || true; wait "$service_pid" 2>/dev/null || true' EXIT
+          success=0
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail http://127.0.0.1:1984/luxe-event-driven-download-queue.html -o /tmp/luxe-queue.html; then
+              success=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$success" -ne 1 ]; then
+            cat /tmp/luxe-event-queue-smoke.log
+            exit 1
+          fi
+          grep -Fq '三路录像事件下载队列' /tmp/luxe-queue.html
+      - name: Pack independent local HAOS App
+        run: |
+          set -eu
+          mkdir -p staging/luxe_event_queue_poc
+          cp packaging/haos-local-event-queue/config.yaml staging/luxe_event_queue_poc/
+          cp packaging/haos-local-event-queue/Dockerfile staging/luxe_event_queue_poc/
+          cp packaging/haos-local-event-queue/run.sh staging/luxe_event_queue_poc/
+          cp dist/go2rtc-event-download-queue-poc-amd64 staging/luxe_event_queue_poc/go2rtc
+          chmod +x staging/luxe_event_queue_poc/go2rtc
+          tar -C staging -czf dist/luxe-event-driven-queue-local-app-amd64.tar.gz luxe_event_queue_poc
+          sha256sum dist/luxe-event-driven-queue-local-app-amd64.tar.gz >> dist/SHA256SUMS.txt
+          tar tzf dist/luxe-event-driven-queue-local-app-amd64.tar.gz | grep -F 'luxe_event_queue_poc/config.yaml'
+          tar tzf dist/luxe-event-driven-queue-local-app-amd64.tar.gz | grep -F 'luxe_event_queue_poc/go2rtc'
+      - name: Upload POC test artifact (never a production Release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: luxe-event-driven-download-queue-${{ github.run_number }}-${{ github.run_attempt }}
+          path: dist/*
+          retention-days: 7
