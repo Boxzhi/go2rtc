@@ -73,7 +73,7 @@ jobs:
             cat /tmp/luxe-event-queue-smoke.log
             exit 1
           fi
-          grep -Fq '三路录像事件下载队列' /tmp/luxe-queue.html
+          grep -Fq '自动续下实验版 v0.4.2' /tmp/luxe-queue.html
       - name: Pack independent local HAOS App
         run: |
           set -eu
