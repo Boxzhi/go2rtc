@@ -31,6 +31,7 @@ jobs:
               if item not in html: raise SystemExit(f"missing state interface: {item}")
           PY
           node --check /tmp/luxe-recorder-rc.js
+          node tests/luxe-recording-rc-flow.test.cjs
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
