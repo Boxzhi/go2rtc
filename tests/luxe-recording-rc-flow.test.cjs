@@ -52,6 +52,11 @@ function harness(){
     }
     if(p.endsWith("/start")&&method==="POST"){
       const req=JSON.parse(options.body);
+      if([...sessions.values()].some(r=>r.source===req.source&&r.state==="ready"))
+        return response({error:"camera already has pending MP4"},409);
+      for(const [id,r] of sessions){
+        if(r.source===req.source&&r.state==="presented")sessions.delete(id);
+      }
       const id="id"+(++nextID);
       const value={id,source:req.source,group:req.group,filename:id+".mp4",state:"recording",
         started_at:new Date(clock).toISOString(),
@@ -60,7 +65,12 @@ function harness(){
       return response(value,202);
     }
     if(p.includes("/ack/")&&method==="POST"){
-      const id=p.split("/").at(-1);sessions.delete(id);
+      const id=p.split("/").at(-1),action=JSON.parse(options.body).action;
+      const recording=sessions.get(id);
+      if(action==="presented"){
+        if(!recording||recording.state!=="ready")return response({error:"not ready"},409);
+        recording.state="presented";
+      }else sessions.delete(id);
       return {status:204,ok:true,json:async()=>null};
     }
     if(p.includes("/stop/")&&method==="POST"){
@@ -122,6 +132,11 @@ async function allThreeClose(){
   h.$("batch").click();await settle();
   assert.equal(h.shared.length,1,"one user gesture should open share");
   assert.equal(h.shared[0].length,3,"one share must include three independent MP4");
+  assert.equal(h.renderButton(0).textContent,"录制");
+  assert.equal(h.renderButton(1).textContent,"录制");
+  assert.equal(h.renderButton(2).textContent,"录制");
+  assert.equal([...h.sessions.values()].filter(s=>s.state==="presented").length,3,
+    "batch presentation preserves three cached videos without Save UI");
 }
 
 async function staggeredCompletion(){
@@ -131,6 +146,8 @@ async function staggeredCompletion(){
   await h.poll();await settle();
   h.advance(2500);await settle();
   assert.equal(h.native.length,1,"first completed file automatically invokes native WKDownload");
+  assert.equal(h.renderButton(0).textContent,"录制",
+    "first native download request immediately resets corresponding record icon");
   h.finish(1);h.finish(2,1200);
   await h.poll();await settle();
   assert.equal(h.native.length,1,"later ready cameras must not open other native download sheets");
@@ -140,6 +157,10 @@ async function staggeredCompletion(){
   h.$("batch").click();await settle();
   assert.equal(h.shared.length,1);
   assert.equal(h.shared[0].length,2,"already native-downloaded first file must be excluded");
+  assert.equal(h.renderButton(0).textContent,"录制");
+  assert.equal(h.renderButton(1).textContent,"录制");
+  assert.equal(h.renderButton(2).textContent,"录制");
+  assert.equal([...h.sessions.values()].filter(s=>s.state==="presented").length,3);
   assert.equal(h.errors.length,0);
 }
 async function main(){
