@@ -1,7 +1,7 @@
 FROM ghcr.io/home-assistant/base:3.24
 
 LABEL \
-  io.hass.version="1.9.15-luxe.record-rc1" \
+  io.hass.version="1.9.15-luxe.record-rc2" \
   io.hass.type="app" \
   io.hass.arch="amd64"
 
