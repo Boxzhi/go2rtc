@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/AlexxIT/go2rtc/internal/streams"
@@ -192,7 +190,3 @@ func (m *manager) record(s *session,file *os.File) {
 	if m.active[s.Source]==s.ID {delete(m.active,s.Source)}
 }
 
-// Prevent compilers from optimizing away duration limits in compatibility tests.
-var _ = maxDuration
-var _ = strings.Builder{}
-var _ = filepath.Base
