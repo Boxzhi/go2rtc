@@ -288,6 +288,10 @@
       }
       _rcOnReady(newly){
         if(this._rcAutoDone||!this._rcGroup)return;
+        // A native download/share may still be open. The HA App has no
+        // observable close callback: suppress all further automatic sheets
+        // until user explicitly acknowledges the pending video.
+        if(this._rcRequested.size){this._rcAutoDone=true;return;}
         const candidates=this._recordings.filter(s=>s?.state==='ready'&&s.group===this._rcGroup);
         if(!candidates.length)return;
         if(this._rcCoalesceTimer)return;
@@ -302,6 +306,7 @@
           // coalescing window before opening any native download sheet.
           await this._rcRefresh();
           if(this._rcAutoDone||!this.isConnected)return;
+          if(this._rcRequested.size){this._rcAutoDone=true;return;}
           const ready=this._recordings.filter(s=>valid(s)&&s.group===this._rcGroup);
           if(!ready.length)return;
           const times=ready.map(s=>Date.parse(s.ready_at));
