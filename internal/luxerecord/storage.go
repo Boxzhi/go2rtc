@@ -115,12 +115,39 @@ func (m *manager) pruneLocked(now time.Time) {
 	}
 }
 
+// abortLocked is idempotent. The recording goroutine owns closing the MP4
+// file and purging both partial and finalized bytes; this helper only revokes
+// the session and forces the stream consumer to stop.
+func (m *manager) abortLocked(s *session) {
+	if s == nil { return }
+	switch s.State {
+	case "recording", "stopping", "finalizing":
+		s.State="aborting"
+		s.stopOnce.Do(func(){ if s.stop!=nil {close(s.stop)} })
+	}
+}
+
+// A suspended iOS WebView cannot guarantee that its last JS event or network
+// request runs. Enforce cancellation independently from the frontend.
+func (m *manager) expireForegroundLeasesLocked(now time.Time) {
+	for _,s:=range m.sessions {
+		switch s.State {
+		case "recording", "stopping", "finalizing":
+			if !s.lastHeartbeat.IsZero() && now.Sub(s.lastHeartbeat)>heartbeatTimeout {
+				m.abortLocked(s)
+			}
+		}
+	}
+}
+
 func (m *manager) janitor() {
-	t:=time.NewTicker(10*time.Second)
+	t:=time.NewTicker(2*time.Second)
 	defer t.Stop()
 	for range t.C {
 		m.mu.Lock()
-		m.pruneLocked(time.Now())
+		now:=time.Now()
+		m.expireForegroundLeasesLocked(now)
+		m.pruneLocked(now)
 		m.mu.Unlock()
 	}
 }
