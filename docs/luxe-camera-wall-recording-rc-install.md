@@ -29,7 +29,7 @@ Upload the artifact's `luxe-camera-wall-recording-rc.js` to `/config/www/`.
 Settings > Dashboards > Resources: ensure the **original** `luxe-camera-wall.js` resource remains loaded. Add this second JS module:
 
 ```yaml
-url: /local/luxe-camera-wall-recording-rc.js?v=rc2-slugfix
+url: /local/luxe-camera-wall-recording-rc.js?v=rc2-ingressfix
 type: module
 ```
 
@@ -50,6 +50,14 @@ cameras:
 ```
 
 The new card inherits the original responsive layout, screenshot tools, native WebRTC controls, audio exclusivity, playing logic and iPad/iPhone sizing. Only its recording implementation is replaced.
+
+## RC2 Ingress API path hotfix (no new backend install)
+
+The former RC2 overlay incorrectly treated the add-on `ingress_url` as its API root. Supervisor's `ingress_url` **includes** the configured `ingress_entry` file, so it was generating `.../luxe-xiaomi-recorder-rc.html/api/luxe/recordings/start` and receiving HTML/other content instead of JSON.
+
+The repaired overlay extracts just `/api/hassio_ingress/<token>/` before appending `api/luxe/recordings/start`. It keeps the known full Supervisor slug `local_luxe_xiaomi_record_rc`.
+
+If RC2 is already installed and running, **only replace** `/config/www/luxe-camera-wall-recording-rc.js` with this branch's updated JS file, change the resource query version to `?v=rc2-ingressfix`, and reload the official HA iOS App test view. The recording add-on does **not** need to be reinstalled; do not touch production. The corrected test reports the HTTP status and content type if an Ingress proxy problem remains, without printing credentials or tokenized paths.
 
 ## 3. One integrated iPhone acceptance test
 
