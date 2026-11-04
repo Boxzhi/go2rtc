@@ -286,22 +286,16 @@ func (m *manager) start(w http.ResponseWriter, r *http.Request) {
 		reject(w, http.StatusInsufficientStorage, "cannot measure free temporary disk space")
 		return
 	}
-	reserved := int64(len(m.activeIDs)+1) * maxBytes
 	committed := int64(0)
 	for _, existing := range m.sessions {
 		if existing.state == "ready" {
 			committed += existing.bytes
 		}
 	}
-	if committed+reserved > maxTotalBudget {
-		m.mu.Unlock()
-		reject(w, http.StatusInsufficientStorage, "POC.4 total temporary media budget exceeded; wait for expiry")
-		return
-	}
 	free := uint64(disk.Bavail)*uint64(disk.Bsize)
-	if free < uint64(reserved+minDiskReserve) {
+	if !hasTemporarySpace(committed, len(m.activeIDs)+1, free) {
 		m.mu.Unlock()
-		reject(w, http.StatusInsufficientStorage, "insufficient free temporary disk space for concurrent capture reservations")
+		reject(w, http.StatusInsufficientStorage, "insufficient safe temporary disk space for recording; check available storage")
 		return
 	}
 	m.activeIDs[request.Source] = id
@@ -372,6 +366,19 @@ func (m *manager) start(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusAccepted, s.view())
 }
 
+
+func hasTemporarySpace(committed int64, activeReservations int, free uint64) bool {
+	if committed < 0 || activeReservations < 0 || activeReservations > maxActive {
+		return false
+	}
+	reserved := int64(activeReservations) * maxBytes
+	return committed+reserved <= maxTotalBudget && free >= uint64(reserved+minDiskReserve)
+}
+
+func recordingEndedEarly(elapsed, requested time.Duration, manuallyStopped bool) bool {
+	return !manuallyStopped && elapsed+3*time.Second < requested
+}
+
 type boundedWriter struct {
 	out io.Writer
 	max int64
@@ -416,7 +423,7 @@ func (m *manager) record(s *session, file *os.File) {
 	m.mu.Lock()
 	manualStop := s.state == "stopping"
 	m.mu.Unlock()
-	if writeErr == nil && !manualStop && time.Since(s.started)+3*time.Second < s.duration {
+	if writeErr == nil && recordingEndedEarly(time.Since(s.started), s.duration, manualStop) {
 		writeErr = fmt.Errorf("stream ended before requested duration of %v; MP4 rejected", s.duration)
 	}
 	if writeErr == nil && size < 1024 {
