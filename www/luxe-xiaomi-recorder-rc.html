@@ -217,7 +217,7 @@ async function reload(recover=false){
     for(const s of result.sessions||[]){
       if(!cams.some(c=>c.name===s.source))continue;
       const existing=latest.get(s.source);
-      if(!existing||s.id>existing.id)latest.set(s.source,s);
+      if(!existing||Date.parse(s.started_at)>Date.parse(existing.started_at))latest.set(s.source,s);
     }
     const added=[];
     for(const s of latest.values()){
