@@ -189,6 +189,42 @@ async function explicitNewRecordingCanAutoDownload(){
   assert.equal(h.card._recordings[1],null,
     'after the second native download, record icon must reset automatically');
 }
+async function noReadyBadgeAndNoConfirmationUI(){
+  const h=make();
+  const recordingButton={innerHTML:'<svg>record</svg>',title:'',_rcOriginalHTML:'<svg>record</svg>',
+    setAttribute(name,value){this[name]=value}};
+  const status={hidden:false,style:{},querySelector(selector){
+    if(selector==='.record-status-label')return {hidden:false,textContent:''};
+    return null;
+  }};
+  const tile={
+    querySelector(selector){
+      if(selector==='.luxe-media-record')return recordingButton;
+      if(selector==='.luxe-record-status')return status;
+      if(selector==='.luxe-rc-confirm')throw Error('confirmation control must not be queried');
+      return null;
+    },
+    classList:{toggle(){},remove(){}}
+  };
+  h.card._wall={children:[tile]};
+  const s={
+    id:'pending_video',source:sources[0],state:'ready',
+    expires_at:new Date(Date.now()+14*60*1000).toISOString(),
+    expiresAt:Date.now()+14*60*1000,
+    filename:'pending.mp4'
+  };
+  h.card._recordings[0]=s;
+  h.card._syncRecordingUI(0);
+  assert.equal(status.hidden,true,'ready state must not show top-right countdown');
+  assert.match(recordingButton.innerHTML,/svg/,'ready state shows save icon');
+  assert.doesNotMatch(recordingButton.title,/剩余|14:/,'button tooltip must not show TTL');
+  h.card._recordings[0]=null;
+  h.card._syncRecordingUI(0);
+  assert.equal(recordingButton.innerHTML,'<svg>record</svg>',
+    'after native download requested, icon immediately restores original record SVG');
+  assert.equal(status.hidden,true,'idle must not display stale ready status');
+}
+
 async function localAddonSlugRegression(){
   const variants=[
     '/api/hassio_ingress/abc/luxe-xiaomi-recorder-rc.html',
@@ -208,7 +244,7 @@ async function localAddonSlugRegression(){
   }
 }
 async function test(){
- await localAddonSlugRegression();await closeGroup();await staggered();await explicitNewRecordingCanAutoDownload();
+ await localAddonSlugRegression();await noReadyBadgeAndNoConfirmationUI();await closeGroup();await staggered();await explicitNewRecordingCanAutoDownload();
  console.log('PASS: RC subclass 3-video coalescing, record icon reset on native/share opening, new recording purges old MP4, single native popup per group, explicit new recording permits new download, remaining-two share, navigation independence, full local Supervisor slug');
 }
 test().catch(e=>{console.error(e);process.exitCode=1;});
