@@ -78,6 +78,7 @@
         this._rcBatchFailed='';
         this._rcGeneration=0;
         this._rcBackgroundEpoch=0;
+        this._rcAbortedIds=new Set();
         this._rcResolvedBase='';
         this._rcHeartbeatInterval=null;
         this._rcHiddenHandler=()=>this._rcOnVisibility();
@@ -198,7 +199,10 @@
         for(let index=0;index<this._recordings.length;index++){
           const s=this._recordings[index];
           if(!s||!['starting','recording','stopping','finalizing'].includes(s.state))continue;
-          if(s.id)void this._rcRequestBackgroundAction(s.id,'abort',true).catch(()=>{});
+          if(s.id){
+            this._rcAbortedIds.add(s.id);
+            void this._rcRequestBackgroundAction(s.id,'abort',true).catch(()=>{});
+          }
           this._recordings[index]=null;
           this._rcBusy[index]=false;
           this._syncRecordingUI(index);
@@ -298,7 +302,10 @@
             source,group:this._rcGroup,duration_seconds:1800,
           });
           if(foregroundEpoch!==this._rcBackgroundEpoch||document.hidden){
-            if(result?.id)void this._rcRequestBackgroundAction(result.id,'abort',true).catch(()=>{});
+            if(result?.id){
+              this._rcAbortedIds.add(result.id);
+              void this._rcRequestBackgroundAction(result.id,'abort',true).catch(()=>{});
+            }
             this._recordings[index]=null;
             return;
           }
@@ -360,7 +367,9 @@
             const source=this._rcSource(i);
             // Presented MP4s remain in the 15-minute backend cache, but
             // should never reappear as "Save" after reloading the view.
-            const records=sessions.filter(s=>s.source===source&&s.state!=='presented');
+            const records=sessions.filter(s=>s.source===source&&
+              s.state!=='presented'&&s.state!=='aborting'&&
+              !this._rcAbortedIds.has(s.id));
             records.sort((a,b)=>Date.parse(b.started_at)-Date.parse(a.started_at));
             const selected=records[0]||null;
             if(selected?.state==='ready'&&!this._rcReadySeen.has(selected.id)){
