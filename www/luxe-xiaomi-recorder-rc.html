@@ -148,8 +148,8 @@ function updateShareButton(){
   const options=eligible.length>=2?eligible:ready;
   const signature=options.map(s=>s.id).join("|");
   if(shareIDs!==signature){shareFiles=null;shareIDs=signature;}
-  $("batch").disabled=!mayShare(options)||batchFetching;
-  $("batch").textContent=shareFiles?"一次分享 "+options.length+" 个 MP4":"准备分享 "+options.length+" 个 MP4";
+  $("batch").disabled=!mayShare(options)||batchFetching||!shareFiles;
+  $("batch").textContent=shareFiles?"一次分享 "+options.length+" 个 MP4":batchFetching?"正在准备文件…":"等待文件准备";
   $("batchInfo").textContent=!options.length?"等待 MP4 完成":
     mayShare(options)?(batchFetching?"正在读取完整 MP4…":"可批量分享（手动点击）"):
     "部分视频较大，建议通过各自的「保存」按钮使用原生 WKDownload";
@@ -178,11 +178,14 @@ function onNewReady(added){
   if(!ready.length)return;
   if(!firstObservedReady)firstObservedReady=Date.now();
   if(groupReadyAll(ready)){
-    // All ready within the 2 s coalescing window: enable single user gesture share.
-    if(Date.now()-firstObservedReady<=2000&&mayShare(ready)){
+    // Use actual server-side ready timestamps, not a potentially paused
+    // WebView polling timestamp, when deciding whether to coalesce.
+    const times=ready.map(s=>Date.parse(s.ready_at));
+    const gap=Math.max(...times)-Math.min(...times);
+    if(gap<=2000&&mayShare(ready)){
       autoNativeIssued=true;
       log("三路于合并窗口内就绪：优先一次分享，等待用户点击");
-      updateShareButton();
+      void prepareBatch();
       return;
     }
   }
@@ -193,13 +196,16 @@ function onNewReady(added){
     const candidates=readySessions().filter(s=>s.group===currentGroup);
     if(!candidates.length)return;
     const ordered=[...candidates].sort((a,b)=>Date.parse(a.ready_at)-Date.parse(b.ready_at));
-    if(groupReadyAll(ordered)&&mayShare(ordered)&&Date.now()-firstObservedReady<=2600){
+    const readyTimes=ordered.map(s=>Date.parse(s.ready_at));
+    if(groupReadyAll(ordered)&&mayShare(ordered)&&Math.max(...readyTimes)-Math.min(...readyTimes)<=2000){
       autoNativeIssued=true;
       log("三路接近同时完成，改为一次分享，不弹出单份下载窗口");
+      void prepareBatch();
       return;
     }
     autoNativeIssued=true;
     nativeSave(ordered[0]);
+    void prepareBatch();
   },2000);
 }
 async function reload(recover=false){
@@ -226,11 +232,17 @@ async function reload(recover=false){
       currentGroup=latest.values().next().value?.group||"";
       log("服务端恢复 "+latest.size+" 路会话；旧的 ready 文件仅显示保存按钮，不自动弹窗");
     }else if(added.length)onNewReady(added);
+    if(autoNativeIssued)void prepareBatch();
     draw();
   }catch(e){feedback("状态同步失败："+String(e));}
   finally{refreshing=false;}
 }
 async function startOne(cam,groupId=""){
+  if(!groupId){
+    currentGroup="g_"+Date.now().toString(36);
+    groupId=currentGroup;
+    autoNativeIssued=false;firstObservedReady=0;
+  }
   try{
     const result=await call("start",{method:"POST",headers:auth(true),body:JSON.stringify({
       source:cam.name,group:groupId,duration_seconds:Number($("duration").value)
@@ -268,39 +280,51 @@ async function ack(s,action){
     draw();
   }catch(e){feedback("清理录像失败："+String(e));}
 }
-async function share(){
+async function prepareBatch(){
   const ready=readySessions();
   const group=ready.filter(s=>s.group===currentGroup);
   const fileset=group.length>=2?group:ready;
-  if(!mayShare(fileset)){feedback("录像太大，不能安全批量加载；请逐个原生下载");return;}
+  if(!mayShare(fileset)||batchFetching)return;
   const id=fileset.map(s=>s.id).join("|");
-  if(!shareFiles||shareIDs!==id){
-    batchFetching=true;updateShareButton();
-    try{
-      const f=[];
-      for(const s of fileset){
-        const u=new URL(s.download_url,location.href);
-        if(u.origin!==location.origin)throw Error("文件地址非同源");
-        const res=await fetch(u.href,{cache:"no-store"});
-        if(!res.ok)throw Error(s.source+" HTTP "+res.status);
-        const blob=await res.blob();
-        if(blob.size!==s.bytes)throw Error(s.source+" 文件长度校验失败");
-        const head=new Uint8Array(await blob.slice(4,8).arrayBuffer());
-        if(String.fromCharCode(...head)!=="ftyp")throw Error(s.source+" MP4 头校验失败");
-        f.push(new File([blob],s.filename,{type:"video/mp4"}));
-      }
-      if(!navigator.canShare?.({files:f})||!navigator.share)throw Error("当前 HA App 不支持这些文件批量分享");
-      if(readySessions().some(s=>Date.now()>=Date.parse(s.expires_at)))throw Error("有录像已到期");
-      shareFiles=f;shareIDs=id;
-      log("已经准备 "+f.length+" 个 MP4；请再次点击「一次分享」");
-    }catch(e){shareFiles=null;feedback("准备分享失败："+String(e));}
-    finally{batchFetching=false;updateShareButton();}
-    return;
-  }
-  // Must call navigator.share in the original user button gesture.
+  if(shareFiles&&shareIDs===id)return;
+  shareFiles=null;shareIDs=id;batchFetching=true;updateShareButton();
+  try{
+    const readyFiles=[];
+    for(const s of fileset){
+      if(Date.now()>=Date.parse(s.expires_at))throw Error(s.source+" 录像已过期");
+      const u=new URL(s.download_url,location.href);
+      if(u.origin!==location.origin)throw Error("文件地址非同源");
+      const response=await fetch(u.href,{cache:"no-store"});
+      if(!response.ok)throw Error(s.source+" HTTP "+response.status);
+      const blob=await response.blob();
+      if(blob.size!==s.bytes||blob.size>SHARE_FILE_CAP)throw Error(s.source+" 文件长度校验失败");
+      const head=new Uint8Array(await blob.slice(4,8).arrayBuffer());
+      if(String.fromCharCode(...head)!=="ftyp")throw Error(s.source+" MP4 头校验失败");
+      readyFiles.push(new File([blob],s.filename,{type:"video/mp4"}));
+    }
+    if(!navigator.canShare?.({files:readyFiles})||!navigator.share)throw Error("当前 HA App 不支持批量分享");
+    const current=readySessions();
+    const live=current.filter(s=>s.group===currentGroup);
+    const actual=(live.length>=2?live:current).map(s=>s.id).join("|");
+    if(actual!==id)return;
+    shareFiles=readyFiles;shareIDs=id;
+    log("已自动准备 "+readyFiles.length+" 个 MP4，用户只需点击一次分享按钮");
+  }catch(e){shareFiles=null;log("批量分享不可用（可逐个下载）："+String(e));}
+  finally{batchFetching=false;updateShareButton();}
+}
+function share(){
+  const ready=readySessions();
+  const group=ready.filter(s=>s.group===currentGroup);
+  const fileset=group.length>=2?group:ready;
+  const id=fileset.map(s=>s.id).join("|");
+  if(!shareFiles||shareIDs!==id){feedback("文件尚未准备好，请稍后使用单独保存");return;}
+  // Called immediately inside the click event, preserving iOS user activation.
   try{
     const promise=navigator.share({files:shareFiles});
-    Promise.resolve(promise).then(()=>log("系统分享面板返回；仍需用户确认已保存"),e=>log("分享取消/失败："+String(e)));
+    Promise.resolve(promise).then(
+      ()=>log("系统分享面板返回；请逐路点击「确认已保存」后释放服务器缓存"),
+      e=>log("批量分享取消或失败："+String(e))
+    );
   }catch(e){feedback("无法调用系统分享："+String(e));}
 }
 $("startAll").addEventListener("click",()=>void startAll());
