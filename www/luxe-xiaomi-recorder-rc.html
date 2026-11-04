@@ -71,7 +71,7 @@ const api=new URL("./api/luxe/recordings/",location.href);
 const SHARE_FILE_CAP=16*1048576,SHARE_TOTAL_CAP=32*1048576;
 let currentGroup="",map=new Map(),activeNative=null,autoNativeIssued=false;
 let firstObservedReady=0,coalesceTimer=null,pollBusy=false,shareFiles=null,shareIDs="";
-let batchFetching=false,pendingConfirm=new Set(),previousReady=new Set(),refreshing=false;
+let batchFetching=false,pendingConfirm=new Set(),previousReady=new Set(),refreshing=false,failedShareSig='';
 const log=s=>{$("logs").textContent+="["+new Date().toLocaleTimeString()+"] "+s+"\n";$("logs").scrollTop=$("logs").scrollHeight;};
 const feedback=s=>{$("feedback").textContent=s;log(s);};
 function auth(json=false){
@@ -239,9 +239,14 @@ async function reload(recover=false){
 }
 async function startOne(cam,groupId=""){
   if(!groupId){
-    currentGroup="g_"+Date.now().toString(36);
+    // Independently clicked camera buttons may belong to the same pending
+    // group. Never reset the native-sheet guard while an earlier MP4 exists.
+    if(!hasUnfinished()&&readySessions().length===0){
+      currentGroup="g_"+Date.now().toString(36);
+      autoNativeIssued=false;firstObservedReady=0;
+    }
+    if(!currentGroup)currentGroup="g_"+Date.now().toString(36);
     groupId=currentGroup;
-    autoNativeIssued=false;firstObservedReady=0;
   }
   try{
     const result=await call("start",{method:"POST",headers:auth(true),body:JSON.stringify({
@@ -276,6 +281,9 @@ async function ack(s,action){
     previousReady.delete(s.id);
     if(activeNative===s.id)activeNative=null;
     map.delete(s.source);
+    if(!readySessions().some(v=>!pendingConfirm.has(v.id))&&!activeNative){
+      autoNativeIssued=false;firstObservedReady=0;
+    }
     log(s.source+" 用户确认 "+action+"；对应按钮恢复为「录制」");
     draw();
   }catch(e){feedback("清理录像失败："+String(e));}
@@ -286,6 +294,7 @@ async function prepareBatch(){
   const fileset=group.length>=2?group:ready;
   if(!mayShare(fileset)||batchFetching)return;
   const id=fileset.map(s=>s.id).join("|");
+  if(id===failedShareSig)return;
   if(shareFiles&&shareIDs===id)return;
   shareFiles=null;shareIDs=id;batchFetching=true;updateShareButton();
   try{
@@ -309,7 +318,7 @@ async function prepareBatch(){
     if(actual!==id)return;
     shareFiles=readyFiles;shareIDs=id;
     log("已自动准备 "+readyFiles.length+" 个 MP4，用户只需点击一次分享按钮");
-  }catch(e){shareFiles=null;log("批量分享不可用（可逐个下载）："+String(e));}
+  }catch(e){shareFiles=null;failedShareSig=id;log("批量分享不可用（可逐个下载）："+String(e));}
   finally{batchFetching=false;updateShareButton();}
 }
 function share(){
