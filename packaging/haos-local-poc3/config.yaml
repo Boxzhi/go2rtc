@@ -1,6 +1,6 @@
 name: "Luxe After-Stop Recording POC.3"
 slug: "luxe_after_stop_poc3"
-version: "0.3.0"
+version: "0.3.1"
 description: "Isolated three-camera recording and serialized native-download queue; not production go2rtc"
 stage: experimental
 url: "https://github.com/Boxzhi/go2rtc/tree/feat/luxe-three-record-queue"
