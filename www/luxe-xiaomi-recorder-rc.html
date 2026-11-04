@@ -312,7 +312,7 @@ async function prepareBatch(){
       readyFiles.push(new File([blob],s.filename,{type:"video/mp4"}));
     }
     if(!navigator.canShare?.({files:readyFiles})||!navigator.share)throw Error("当前 HA App 不支持批量分享");
-    const current=readySessions();
+    const current=readySessions().filter(s=>!pendingConfirm.has(s.id));
     const live=current.filter(s=>s.group===currentGroup);
     const actual=(live.length>=2?live:current).map(s=>s.id).join("|");
     if(actual!==id)return;
