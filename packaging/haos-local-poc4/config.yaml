@@ -1,0 +1,28 @@
+name: "Luxe After-Stop Recording POC.4"
+slug: "luxe_after_stop_poc4"
+version: "0.4.0"
+description: "Isolated three-camera 1/5-minute recording and serialized downloads; isolated test only"
+stage: experimental
+url: "https://github.com/Boxzhi/go2rtc/tree/feat/luxe-long-record-stress"
+arch:
+  - amd64
+startup: application
+boot: manual
+init: false
+ingress: true
+ingress_port: 1984
+ingress_entry: "luxe-record-after-stop-poc4.html"
+panel_title: "Luxe 长录像测试"
+panel_icon: "mdi:video-multiple"
+panel_admin: true
+options:
+  source_1: "rtsp://fee2ccf4-luxe-go2rtc:8554/jinghuafu_keting_ptz_3k"
+  source_2: "rtsp://fee2ccf4-luxe-go2rtc:8554/jinghuafu_keting_fixed_3k"
+  source_3: "rtsp://fee2ccf4-luxe-go2rtc:8554/jinghuafu_canting_2k"
+  secret: ""
+schema:
+  source_1: str
+  source_2: str
+  source_3: str
+  secret: password
+backup: cold
