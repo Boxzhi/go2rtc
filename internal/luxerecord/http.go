@@ -31,6 +31,10 @@ func (m *manager) serve(w http.ResponseWriter,r *http.Request) {
 		m.status(w,parts[1])
 	case len(parts)==2 && parts[0]=="stop" && r.Method==http.MethodPost:
 		m.stop(w,parts[1])
+	case len(parts)==2 && parts[0]=="heartbeat" && r.Method==http.MethodPost:
+		m.heartbeat(w,parts[1])
+	case len(parts)==2 && parts[0]=="abort" && r.Method==http.MethodPost:
+		m.abort(w,parts[1])
 	case len(parts)==2 && parts[0]=="ack" && r.Method==http.MethodPost:
 		m.ack(w,r,parts[1])
 	default:
@@ -81,6 +85,31 @@ func (m *manager) stop(w http.ResponseWriter,id string) {
 	result:=s.view()
 	m.mu.Unlock()
 	jsonResponse(w,200,result)
+}
+
+// heartbeat is strictly a foreground lease renewal and never changes an
+// MP4 cache expiry. A nonexistent or already-aborted recording cannot revive.
+func (m *manager) heartbeat(w http.ResponseWriter,id string) {
+	if !safeName.MatchString(id) {errorResponse(w,404,"recording unavailable");return}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s:=m.sessions[id]
+	if s==nil || (s.State!="recording" && s.State!="stopping" && s.State!="finalizing") {
+		errorResponse(w,409,"recording is not active");return
+	}
+	s.lastHeartbeat=time.Now()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// abort is an immediate cancel-and-discard operation, never the normal Stop
+// path. It may be requested when the app transitions to the background.
+// The recording goroutine owns closing and deleting the partial MP4.
+func (m *manager) abort(w http.ResponseWriter,id string) {
+	if !safeName.MatchString(id) {errorResponse(w,404,"recording unavailable");return}
+	m.mu.Lock()
+	if s:=m.sessions[id];s!=nil {m.abortLocked(s)}
+	m.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // "presented" acknowledges only the invocation of a native download/share
