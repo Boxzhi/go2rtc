@@ -15,6 +15,21 @@ jobs:
     steps:
       - name: Checkout isolated branch
         uses: actions/checkout@v4
+      - name: Verify embedded JavaScript and native download overlap behavior
+        run: |
+          set -eu
+          bash -n packaging/haos-local-event-queue/run.sh
+          grep -Fx 'ingress_entry: "luxe-event-driven-download-queue.html"' packaging/haos-local-event-queue/config.yaml
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          html=Path('www/luxe-event-driven-download-queue.html').read_text()
+          m=re.search(r'<script>(.*?)</script>',html,re.DOTALL)
+          assert m,'missing JS block'
+          Path('/tmp/event-queue-inline.js').write_text(m.group(1))
+          PY
+          node --check /tmp/event-queue-inline.js
+          node tests/luxe-event-driven-queue.test.cjs
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -33,21 +48,6 @@ jobs:
           mkdir -p dist
           go build -trimpath -ldflags="-s -w" -o dist/go2rtc-event-download-queue-poc-amd64 .
           sha256sum dist/go2rtc-event-download-queue-poc-amd64 > dist/SHA256SUMS.txt
-      - name: Verify embedded JavaScript and native download overlap behavior
-        run: |
-          set -eu
-          bash -n packaging/haos-local-event-queue/run.sh
-          grep -Fx 'ingress_entry: "luxe-event-driven-download-queue.html"' packaging/haos-local-event-queue/config.yaml
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          html=Path('www/luxe-event-driven-download-queue.html').read_text()
-          m=re.search(r'<script>(.*?)</script>',html,re.DOTALL)
-          assert m,'missing JS block'
-          Path('/tmp/event-queue-inline.js').write_text(m.group(1))
-          PY
-          node --check /tmp/event-queue-inline.js
-          node tests/luxe-event-driven-queue.test.cjs
       - name: Smoke test test-App ingress page
         run: |
           set -eu
