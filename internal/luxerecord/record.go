@@ -100,7 +100,7 @@ func (m *manager) start(w http.ResponseWriter,r *http.Request) {
 	s:=&session{
 		ID:id,Token:token,Source:req.Source,Group:req.Group,
 		Filename:fmt.Sprintf("luxe_%s_%s_%s.mp4",req.Source,now.Format("20060102_150405"),id[:8]),
-		State:"recording", Started:now,
+		State:"recording", Started:now, lastHeartbeat:now,
 		Duration:time.Duration(req.DurationSeconds)*time.Second,
 		VideoCodec:videoCodec,AudioCodec:audioCodec,
 		stream:stream,consumer:consumer,stop:make(chan struct{}),
@@ -150,9 +150,20 @@ func (m *manager) record(s *session,file *os.File) {
 	<-consumerStopped
 
 	m.mu.Lock()
+	aborting:=s.State=="aborting"
 	manuallyStopped:=s.State=="stopping"
-	if !manuallyStopped {s.State="finalizing"}
+	if !aborting && !manuallyStopped {s.State="finalizing"}
 	m.mu.Unlock()
+
+	if aborting {
+		_ = file.Close()
+		m.mu.Lock()
+		m.deleteFiles(s.ID)
+		delete(m.sessions,s.ID)
+		if m.active[s.Source]==s.ID {delete(m.active,s.Source)}
+		m.mu.Unlock()
+		return
+	}
 
 	if writeErr==nil && !manuallyStopped && time.Since(s.Started)+3*time.Second<s.Duration {
 		writeErr=errors.New("upstream ended before requested recording duration")
@@ -174,6 +185,12 @@ func (m *manager) record(s *session,file *os.File) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if s.State=="aborting" {
+		m.deleteFiles(s.ID)
+		delete(m.sessions,s.ID)
+		if m.active[s.Source]==s.ID {delete(m.active,s.Source)}
+		return
+	}
 	finished:=time.Now()
 	s.Bytes=writer.n
 	if writeErr!=nil {
