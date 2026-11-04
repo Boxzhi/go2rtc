@@ -1546,6 +1546,120 @@
       this._playCamera(index);
     }
 
+    // These are diagnostic phases, not credentials or private WebSocket URLs.
+    // The native WebRTC Camera uses HA auth/sign_path before opening /api/webrtc/ws.
+    _connectionStage(index) {
+      const camera=this._cards[index];
+      if (!camera) return customElements.get('webrtc-camera') ?
+        '播放器初始化' : '播放器组件加载';
+      const status=camera.shadowRoot?.querySelector('.mode')?.textContent?.trim().toLowerCase();
+      if (status==='error') return 'HA/视频信令';
+      const video=this._videos[index] || camera.video || camera.shadowRoot?.querySelector('video');
+      if (video?.paused && video.readyState>=2 && video.videoWidth>0)
+        return '浏览器播放限制';
+      if (video && !video.paused && video.readyState>=2 &&
+          video.videoWidth>0 && video.videoHeight>0) return '首帧状态同步';
+      if (!camera.wsURL) return 'HA 授权签名';
+      const pc=camera.pc;
+      if (pc) {
+        if (['failed','closed'].includes(pc.connectionState) ||
+            ['failed','closed'].includes(pc.iceConnectionState)) return 'RTC 传输失败';
+        if (pc.connectionState==='connected' || pc.iceConnectionState==='connected' ||
+            pc.iceConnectionState==='completed') return '等待首帧';
+        return 'RTC 协商';
+      }
+      if (camera.ws?.readyState===0) return 'WebSocket 握手';
+      if (camera.ws?.readyState===1) return 'RTC 协商准备';
+      return '视频信令建立';
+    }
+
+    // Native webrtc-camera may report a signaling error without ever
+    // dispatching an HTMLVideoElement.error. Detect that terminal state
+    // rather than displaying a misleading 45-second "connection timeout".
+    _checkCameraSignaling(index,camera,token) {
+      if (this._cards[index]!==camera || this._sessionTokens[index]!==token ||
+          this._playStates[index]!=='connecting') return;
+      const status=camera.shadowRoot?.querySelector('.mode')?.textContent?.trim().toLowerCase();
+      if (status==='error') {
+        this._failCamera(index,'视频信令失败，点击重试');
+      }
+    }
+
+    // WebRTC's VideoRTC.play() catches rejected promises internally. For
+    // muted streams with a decoded frame but a paused video, request one
+    // additional native play. If the browser requires a user gesture, show
+    // the central Play button instead of treating that as a network timeout.
+    _attemptVideoPlayback(index,camera,video,token) {
+      if (this._sessionTokens[index]!==token || this._cards[index]!==camera ||
+          this._playStates[index]!=='connecting' ||
+          !video?.paused || video.readyState<2 ||
+          !(video.videoWidth>0 && video.videoHeight>0) ||
+          this._autoplayAttempts[index]===token) return;
+      this._autoplayAttempts[index]=token;
+      const rejected=error=>{
+        if (this._sessionTokens[index]!==token || this._cards[index]!==camera ||
+            this._playStates[index]!=='connecting') return;
+        if (error?.name==='NotAllowedError') {
+          clearTimeout(this._connectTimers[index]);
+          this._connectTimers[index]=null;
+          this._playStates[index]='gesture';
+          this._showStartLayer(index,'gesture');
+        } else {
+          // AbortError is often a transient transport replacement. Don't
+          // falsely report a network failure or keep retrying every 500ms.
+          console.warn('luxe-camera-wall: 自动播放未成功',index+1,
+            String(error?.name||'PlaybackError'));
+        }
+      };
+      try {
+        video.muted=true;
+        const result=video.play();
+        if (result?.then) Promise.resolve(result).then(()=>
+          this._cameraReady(index,camera,video,token)).catch(rejected);
+        else this._cameraReady(index,camera,video,token);
+      } catch (error) { rejected(error); }
+    }
+
+    // Called synchronously from the user's tap: preserve the native user
+    // activation. Never destroy the already negotiated RTC transport.
+    _resumeGesturePlayback(index) {
+      const camera=this._cards[index];
+      const video=this._videos[index] || camera?.video || camera?.shadowRoot?.querySelector('video');
+      if (!camera || !video) {
+        this._stopCamera(index,false,true);
+        this._playCamera(index);
+        return;
+      }
+      const token=this._sessionTokens[index];
+      const rejected=error=>{
+        if (this._sessionTokens[index]!==token || this._cards[index]!==camera ||
+            this._playStates[index]!=='connecting') return;
+        if (error?.name==='NotAllowedError') {
+          clearTimeout(this._connectTimers[index]);
+          this._connectTimers[index]=null;
+          this._playStates[index]='gesture';
+          this._showStartLayer(index,'gesture');
+        } else {
+          this._failCamera(index,'无法恢复视频播放，点击重试');
+        }
+      };
+      try {
+        video.muted=true;
+        const result=video.play();
+        this._playStates[index]='connecting';
+        this._showStartLayer(index,'connecting');
+        clearTimeout(this._connectTimers[index]);
+        this._connectTimers[index]=setTimeout(()=>{
+          if (this._sessionTokens[index]===token && this._cards[index]===camera &&
+              this._playStates[index]==='connecting')
+            this._failCamera(index,'播放恢复超时（'+this._connectionStage(index)+'），点击重试');
+        },CONNECT_TIMEOUT_MS);
+        if (result?.then) Promise.resolve(result).then(()=>
+          this._cameraReady(index,camera,video,token)).catch(rejected);
+        else this._cameraReady(index,camera,video,token);
+      } catch (error) { rejected(error); }
+    }
+
     // Resume an existing WebRTC session when its transport is still alive.
     // If the transport has already closed, rebuild the player through the
     // normal connection path instead of leaving a paused, unusable element.
@@ -1734,7 +1848,7 @@
       }
       const binding=this._videoBindings[index];
       if (binding) {
-        for (const event of ['loadedmetadata','resize','loadeddata'])
+        for (const event of ['loadedmetadata','resize','loadeddata','canplay'])
           binding.video.removeEventListener(event,binding.onDimension);
         binding.video.removeEventListener('volumechange',binding.onVolume);
         binding.video.removeEventListener('playing',binding.onReady);
@@ -2021,23 +2135,43 @@
         this._alignVolumeWithScreenshot(i);
         this._decoratePause(i,camera);
         const video=camera.video || camera.shadowRoot?.querySelector('video');
-        if (!video || this._videos[i]===video) return;
+        if (!video) {
+          this._checkCameraSignaling(i,camera,token);
+          return;
+        }
+        if (this._videos[i]===video) {
+          // Important: playing can precede valid video dimensions. A stable
+          // video element must still be checked while awaiting first frame.
+          this._videoBindings[i]?.onReady();
+          this._checkCameraSignaling(i,camera,token);
+          return;
+        }
         const previous=this._videoBindings[i];
         if (previous) {
-          for (const event of ['loadedmetadata','resize','loadeddata'])
+          for (const event of ['loadedmetadata','resize','loadeddata','canplay'])
             previous.video.removeEventListener(event,previous.onDimension);
           previous.video.removeEventListener('volumechange',previous.onVolume);
           previous.video.removeEventListener('playing',previous.onReady);
           previous.video.removeEventListener('timeupdate',previous.onReady);
+          previous.video.removeEventListener('pause',previous.onPause);
           previous.video.removeEventListener('error',previous.onError);
+          for (const event of ['enterpictureinpicture','leavepictureinpicture',
+                                'webkitpresentationmodechanged'])
+            previous.video.removeEventListener(event,previous.onPipChange);
         }
         // A new playback session must always begin muted.
         if (this._audioActive===i) this._audioActive=-1;
         video.muted=true;
         this._videos[i]=video;
-        const onDimension=()=>this._sampleRatio(i,video,generation);
         const onVolume=()=>this._audioChanged(i,video);
-        const onReady=()=>this._cameraReady(i,camera,video,token);
+        const onReady=()=>{
+          this._cameraReady(i,camera,video,token);
+          this._attemptVideoPlayback(i,camera,video,token);
+        };
+        const onDimension=()=>{
+          this._sampleRatio(i,video,generation);
+          onReady();
+        };
         const onPause=()=>{
           if (this._sessionTokens[i]!==token || this._cards[i]!==camera ||
               this._playStates[i]!=='playing' || !this._desiredPlaying[i]) return;
@@ -2058,7 +2192,7 @@
         },0);
         this._videoBindings[i]={video,onDimension,onVolume,onReady,onPause,onError,onPipChange};
         video.addEventListener('volumechange',onVolume);
-        for (const event of ['loadedmetadata','resize','loadeddata'])
+        for (const event of ['loadedmetadata','resize','loadeddata','canplay'])
           video.addEventListener(event,onDimension);
         video.addEventListener('playing',onReady);
         video.addEventListener('timeupdate',onReady);
