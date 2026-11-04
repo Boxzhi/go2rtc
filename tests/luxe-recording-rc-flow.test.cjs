@@ -64,6 +64,12 @@ function harness(){
       sessions.set(id,value);
       return response(value,202);
     }
+    if(p.includes("/heartbeat/")&&method==="POST")
+      return {status:204,ok:true,json:async()=>null};
+    if(p.includes("/abort/")&&method==="POST"){
+      sessions.delete(p.split("/").at(-1));
+      return {status:204,ok:true,json:async()=>null};
+    }
     if(p.includes("/ack/")&&method==="POST"){
       const id=p.split("/").at(-1),action=JSON.parse(options.body).action;
       const recording=sessions.get(id);
