@@ -11,7 +11,7 @@
 
 ## 1. Install or upgrade the isolated test App
 
-The add-on slug remains `luxe_xiaomi_record_rc`. Stop the old **RC test App only** (not production go2rtc) before replacing it.
+The add-on's local folder / config slug is `luxe_xiaomi_record_rc`, but its **full Supervisor slug** is `local_luxe_xiaomi_record_rc`. Stop the old **RC test App only** (not production go2rtc) before replacing it.
 
 Upload the inner tar.gz to `/config/www/` and use Home Assistant Terminal & SSH:
 
@@ -29,7 +29,7 @@ Upload the artifact's `luxe-camera-wall-recording-rc.js` to `/config/www/`.
 Settings > Dashboards > Resources: ensure the **original** `luxe-camera-wall.js` resource remains loaded. Add this second JS module:
 
 ```yaml
-url: /local/luxe-camera-wall-recording-rc.js?v=rc2
+url: /local/luxe-camera-wall-recording-rc.js?v=rc2-slugfix
 type: module
 ```
 
@@ -39,7 +39,7 @@ Create a new separate test dashboard view/card (do not overwrite the existing mo
 
 ```yaml
 type: custom:luxe-camera-wall-recording-rc
-recording_addon_slug: luxe_xiaomi_record_rc
+recording_addon_slug: local_luxe_xiaomi_record_rc
 cameras:
   - url: jinghuafu_keting_ptz_3k
     muted: true
@@ -54,7 +54,7 @@ The new card inherits the original responsive layout, screenshot tools, native W
 ## 3. One integrated iPhone acceptance test
 
 1. Open the separate card in the **official** Home Assistant iOS App as HA admin.
-2. Start one of the camera previews, click the camera record icon, and enter the separate RC test secret in the card's password dialog. The value is kept in memory, never written into Lovelace YAML. If the RC Add-on cannot be located using its short slug, look up its **actual full slug** under the HA App's Info page and set `recording_addon_slug` to that value.
+2. Start one of the camera previews, click the camera record icon, and enter the separate RC test secret in the card's password dialog. The value is kept in memory, never written into Lovelace YAML. The Supervisor lookup uses the **full local Add-on slug** `local_luxe_xiaomi_record_rc`. Earlier RC2 test cards mistakenly used the short `luxe_xiaomi_record_rc`; correct the YAML to the full slug. The new test JS normalizes the legacy short value for compatibility. This lookup fix changes **only the JS**: you do not need to update the recording back-end App again.
 3. Start the other two cameras' recordings (they can be within ~8 s of the first to be treated as one recording group).
 4. Stop all three after a short period. If the MP4 readiness timestamps are within 2 seconds, wait for the small **保存 3 份录像** group control and click once. Otherwise the first ready recording automatically opens WKDownload and subsequent completed cameras each show a blue **Save** icon in the usual record-control position.
 5. After saving a file, tap its **已保存** confirmation control to remove that individual server cache and reset its recording icon. **Do not tap the confirmation when a native download is canceled**. Confirming a Web Share Promise is not proof of writing to Files.
