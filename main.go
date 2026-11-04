@@ -4,6 +4,7 @@ import (
 	"slices"
 
 	"github.com/AlexxIT/go2rtc/internal/alsa"
+	"github.com/AlexxIT/go2rtc/internal/luxerecord"
 	"github.com/AlexxIT/go2rtc/internal/api"
 	"github.com/AlexxIT/go2rtc/internal/api/ws"
 	"github.com/AlexxIT/go2rtc/internal/app"
@@ -71,6 +72,7 @@ func main() {
 		{"webrtc", webrtc.Init}, // webrtc source, WebRTC server
 		// Main API
 		{"mp4", mp4.Init},     // MP4 API
+		{"luxe_recording", luxerecord.Init}, // opt-in 15m retention recorder
 		{"hls", hls.Init},     // HLS API
 		{"mjpeg", mjpeg.Init}, // MJPEG API
 		// Other sources and servers
