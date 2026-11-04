@@ -231,3 +231,76 @@ func TestPresentedSessionRestoresHiddenAfterRestart(t *testing.T) {
 	if recovered==nil||recovered.State!="presented"{t.Fatalf("restored wrong state: %+v",recovered)}
 	if _,err:=os.Stat(next.filePath(s.ID));err!=nil{t.Fatal("restart should retain presented MP4 until TTL")}
 }
+
+
+func TestBackgroundAbortImmediatelyRevokesRecording(t *testing.T) {
+	m,_:=fixture(t)
+	id:="foreground_lease_test"
+	now:=time.Now()
+	s:=&session{
+		ID:id,Source:"jinghuafu_keting_ptz_3k",State:"recording",
+		Started:now,lastHeartbeat:now,stop:make(chan struct{}),
+	}
+	m.sessions[id]=s
+	m.active[s.Source]=id
+	w:=httptest.NewRecorder()
+	m.serve(w,reqJSON(http.MethodPost,"/api/luxe/recordings/abort/"+id,nil))
+	if w.Code!=http.StatusNoContent {t.Fatalf("abort code %d",w.Code)}
+	if s.State!="aborting" {t.Fatalf("state=%s, expected aborting",s.State)}
+	select {
+	case <-s.stop:
+	default:
+		t.Fatal("background abort did not close producer stop channel immediately")
+	}
+	retry:=httptest.NewRecorder()
+	m.serve(retry,reqJSON(http.MethodPost,"/api/luxe/recordings/abort/"+id,nil))
+	if retry.Code!=http.StatusNoContent {t.Fatalf("repeat abort status %d",retry.Code)}
+	lease:=httptest.NewRecorder()
+	m.serve(lease,reqJSON(http.MethodPost,"/api/luxe/recordings/heartbeat/"+id,nil))
+	if lease.Code!=http.StatusConflict {t.Fatalf("aborted recording accepted a heartbeat: %d",lease.Code)}
+	if _,err:=os.Stat(m.filePath(id));err==nil {
+		t.Fatal("test should not produce a finalized MP4 when aborting")
+	}
+}
+
+func TestForegroundLeaseExpiryAbortsWithoutClientEvent(t *testing.T) {
+	m,_:=fixture(t)
+	now:=time.Now()
+	id:="suspended_webview_lease"
+	s:=&session{ID:id,Source:"jinghuafu_keting_fixed_3k",State:"recording",
+		Started:now.Add(-time.Minute),lastHeartbeat:now.Add(-heartbeatTimeout-time.Millisecond),
+		stop:make(chan struct{})}
+	m.sessions[id]=s
+	m.active[s.Source]=id
+	m.expireForegroundLeasesLocked(now)
+	if s.State!="aborting" {t.Fatalf("stale lease state=%s",s.State)}
+	select {
+	case <-s.stop:
+	default:t.Fatal("expired foreground lease did not stop producer")
+	}
+}
+
+func TestForegroundHeartbeatRenewalAvoidsFalseCancellation(t *testing.T) {
+	m,_:=fixture(t)
+	now:=time.Now()
+	id:="active_foreground_lease"
+	s:=&session{ID:id,Source:"jinghuafu_keting_ptz_3k",State:"recording",
+		Started:now.Add(-time.Minute),lastHeartbeat:now.Add(-10*time.Second),
+		stop:make(chan struct{})}
+	m.sessions[id]=s
+	w:=httptest.NewRecorder()
+	m.serve(w,reqJSON(http.MethodPost,"/api/luxe/recordings/heartbeat/"+id,nil))
+	if w.Code!=http.StatusNoContent {t.Fatalf("heartbeat status %d",w.Code)}
+	if s.lastHeartbeat.Before(now) {t.Fatal("heartbeat timestamp not renewed")}
+	m.expireForegroundLeasesLocked(time.Now())
+	if s.State!="recording" {t.Fatal("healthy foreground lease was aborted")}
+}
+
+func TestBackgroundAbortNeverDeletesReadyVideo(t *testing.T) {
+	m,s:=fixture(t)
+	w:=httptest.NewRecorder()
+	m.serve(w,reqJSON(http.MethodPost,"/api/luxe/recordings/abort/"+s.ID,nil))
+	if w.Code!=http.StatusNoContent {t.Fatalf("abort ready status %d",w.Code)}
+	if s.State!="ready" {t.Fatalf("completed MP4 unexpectedly cancelled: %s",s.State)}
+	if _,err:=os.Stat(m.filePath(s.ID));err!=nil{t.Fatal("ready MP4 deleted on background")}
+}
