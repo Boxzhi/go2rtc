@@ -1,0 +1,93 @@
+name: Luxe Three MP4 One Share - Isolated POC
+
+on:
+  push:
+    branches:
+      - feat/luxe-three-mp4-one-share
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+      - name: Test codec and recording packages
+        run: go test -count=1 ./pkg/h265 ./pkg/iso ./pkg/mp4 ./pkg/xiaomi/miss/... ./internal/mp4 ./internal/afterstop
+      - name: Build all packages
+        run: go build ./...
+      - name: Compile isolated Linux AMD64 binary
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w" -o dist/go2rtc-three-share-poc-amd64 .
+          sha256sum dist/go2rtc-three-share-poc-amd64 > dist/SHA256SUMS.txt
+      - name: Verify page JS syntax and expected completion barrier
+        run: |
+          set -eu
+          bash -n packaging/haos-local-one-share/run.sh
+          grep -Fx 'ingress_entry: "luxe-three-record-one-share-poc.html"' packaging/haos-local-one-share/config.yaml
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          html=Path("www/luxe-three-record-one-share-poc.html").read_text()
+          m=re.search(r"<script>(.*?)</script>",html,re.DOTALL)
+          assert m,"missing JavaScript"
+          Path("/tmp/luxe-three-share-inline.js").write_text(m.group(1))
+          for needle in ["navigator.share", "records.get(c.key)?.state!==\"ready\"", "const MAX_WAIT_MS=90000"]:
+              assert needle in html, f"missing safeguard: {needle}"
+          PY
+          node --check /tmp/luxe-three-share-inline.js
+      - name: HTTP smoke-test embedded ingress page
+        run: |
+          set -eu
+          cat >/tmp/one-share-smoke.yaml <<'EOF'
+          app:
+            modules:
+              - api
+          api:
+            listen: "127.0.0.1:1984"
+          EOF
+          ./dist/go2rtc-three-share-poc-amd64 -c /tmp/one-share-smoke.yaml >/tmp/one-share-smoke.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail http://127.0.0.1:1984/luxe-three-record-one-share-poc.html -o /tmp/share-page.html; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then cat /tmp/one-share-smoke.log;exit 1;fi
+          grep -Fq "三路录像一次保存" /tmp/share-page.html
+      - name: Package separate HAOS local test app
+        run: |
+          set -eu
+          mkdir -p staging/luxe_three_mp4_share_poc
+          cp packaging/haos-local-one-share/config.yaml staging/luxe_three_mp4_share_poc/
+          cp packaging/haos-local-one-share/Dockerfile staging/luxe_three_mp4_share_poc/
+          cp packaging/haos-local-one-share/run.sh staging/luxe_three_mp4_share_poc/
+          cp dist/go2rtc-three-share-poc-amd64 staging/luxe_three_mp4_share_poc/go2rtc
+          chmod +x staging/luxe_three_mp4_share_poc/go2rtc
+          tar -C staging -czf dist/luxe-three-mp4-one-share-local-app-amd64.tar.gz luxe_three_mp4_share_poc
+          sha256sum dist/luxe-three-mp4-one-share-local-app-amd64.tar.gz >> dist/SHA256SUMS.txt
+          tar tzf dist/luxe-three-mp4-one-share-local-app-amd64.tar.gz | grep -F 'luxe_three_mp4_share_poc/config.yaml'
+          tar tzf dist/luxe-three-mp4-one-share-local-app-amd64.tar.gz | grep -F 'luxe_three_mp4_share_poc/go2rtc'
+      - name: Upload POC artifact (not a formal release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: luxe-three-mp4-one-share-${{ github.run_number }}-${{ github.run_attempt }}
+          path: dist/*
+          retention-days: 7
