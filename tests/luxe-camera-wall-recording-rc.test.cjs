@@ -52,12 +52,24 @@ function make(configuredSlug,ingressUrl='/api/hassio_ingress/abc/luxe-xiaomi-rec
       const request=JSON.parse(opts.body);
       if([...db.values()].some(v=>v.source===request.source&&v.state==='ready'))
         return response({error:'camera has pending video to save or discard'},409);
+      // A new recording discards a previously presented temporary MP4.
+      for(const [id,v] of db){
+        if(v.source===request.source&&v.state==='presented')db.delete(id);
+      }
       const id='id_'+(++next);
       const s={id,source:request.source,group:request.group,filename:id+'.mp4',
         state:'recording',started_at:new Date(now).toISOString(),bytes:0,video_codec:'H265',audio_codec:'Opus'};
       db.set(id,s);return response(s,202);
     }
-    if(path.includes('/ack/')&&method==='POST'){db.delete(path.split('/').at(-1));return response(null,204)}
+    if(path.includes('/ack/')&&method==='POST'){
+      const id=path.split('/').at(-1),action=JSON.parse(opts.body).action;
+      if(action==='presented'){
+        const rec=db.get(id);
+        if(!rec||rec.state!=='ready')return response({error:'not ready'},409);
+        rec.state='presented';
+      }else db.delete(id);
+      return response(null,204);
+    }
     if(path.includes('/stop/')&&method==='POST'){
       const s=db.get(path.split('/').at(-1));s.state='stopping';return response(s);
     }
@@ -125,6 +137,10 @@ async function closeGroup(){
   assert.equal(h.shares.length,1);
   assert.equal(h.shares[0].length,3);
   assert.equal(h.card._rcRequested.size,3);
+  assert.ok(h.card._recordings.every(s=>s===null),
+    'all record buttons must immediately reset when one batch share opens');
+  assert.ok([...h.db.values()].every(s=>s.state==='presented'),
+    'batch sharing must retain server MP4 in presented state');
 }
 async function staggered(){
   const h=make();
@@ -133,6 +149,8 @@ async function staggered(){
   await h.card._rcRefresh();await settle();h.advance(2500);await settle();
   assert.equal(h.native.length,1,'first ready must native-download once');
   assert.ok(h.card._rcRequested.has(first.id));
+  assert.equal(h.card._recordings[0],null,'native download immediately resets first record icon');
+  assert.equal(h.db.get(first.id)?.state,'presented','a native download must NOT delete MP4 immediately');
   h.complete(1);h.complete(2,600);
   await h.card._rcRefresh();await settle();
   assert.equal(h.native.length,1,'other recordings cannot open overlapping native sheets');
@@ -140,9 +158,15 @@ async function staggered(){
   h.card._rcShareBatch();await settle();
   assert.equal(h.shares.length,1);
   assert.equal(h.shares[0].length,2);
-  h.card._recordings[0].state='failed';
-  await h.card._startRecording(0).catch(()=>{});
-  assert.ok(h.calls.some(c=>/录像启动失败/.test(c.msg)),'failed active source should show error until ack');
+  assert.equal(h.card._recordings[1],null);
+  assert.equal(h.card._recordings[2],null);
+  assert.ok([...h.db.values()].every(s=>s.state==='presented'));
+  // User starts another recording on the same camera: delete its previous
+  // presented MP4 immediately, but retain the other two cameras' caches.
+  await h.card._startRecording(0);
+  assert.equal(h.db.has(first.id),false,'starting same camera must purge old MP4');
+  assert.ok(h.card._recordings[0]?.state==='recording');
+  assert.equal([...h.db.values()].filter(s=>s.state==='presented').length,2);
   // Navigating away must not request stop from server.
   await h.card._stopAllRecordings('navigation');
   assert.ok([...h.db.values()].some(s=>s.state==='ready'));
@@ -182,6 +206,6 @@ async function localAddonSlugRegression(){
 }
 async function test(){
  await localAddonSlugRegression();await closeGroup();await staggered();await noSecondNativeWhileFirstUnconfirmed();
- console.log('PASS: RC subclass 3-video coalescing, staggered single-native download, no overlapping native sheets, remaining-two share, navigation independence, full local Supervisor slug');
+ console.log('PASS: RC subclass 3-video coalescing, record icon reset on native/share opening, new recording purges old MP4, no overlapping native sheets, remaining-two share, navigation independence, full local Supervisor slug');
 }
 test().catch(e=>{console.error(e);process.exitCode=1;});
