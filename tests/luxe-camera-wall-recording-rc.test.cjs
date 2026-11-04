@@ -209,8 +209,8 @@ async function noReadyBadgeAndNoConfirmationUI(){
   h.card._wall={children:[tile]};
   const s={
     id:'pending_video',source:sources[0],state:'ready',
-    expires_at:new Date(Date.now()+14*60*1000).toISOString(),
-    expiresAt:Date.now()+14*60*1000,
+    expires_at:new Date('2026-11-04T10:14:00Z').toISOString(),
+    expiresAt:Date.parse('2026-11-04T10:14:00Z'),
     filename:'pending.mp4'
   };
   h.card._recordings[0]=s;
