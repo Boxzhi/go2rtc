@@ -16,6 +16,7 @@
   const css=[
     'ha-card { position:relative; }',
     '.tile.luxe-rc-ready .luxe-media-record { opacity:1!important; visibility:visible!important;pointer-events:auto!important;color:#a8e0ff; }',
+    '.tile.luxe-rc-ready .luxe-record-status { display:none!important; }',
     '.tile.luxe-rc-ready .luxe-media-snapshot { display:none; }',
     '.luxe-rc-group {position:absolute;left:50%;top:9px;transform:translateX(-50%);z-index:30;border:0;border-radius:10px;padding:10px 14px;background:rgba(5,104,131,.96);color:white;font-weight:700;white-space:nowrap;cursor:pointer;}',
     '.luxe-rc-group[hidden] {display:none!important;}',
