@@ -6,6 +6,8 @@ const sources=['jinghuafu_keting_ptz_3k','jinghuafu_keting_fixed_3k','jinghuafu_
 function make(configuredSlug,ingressUrl='/api/hassio_ingress/abc/luxe-xiaomi-recorder-rc.html'){
   let now=Date.parse('2026-11-04T10:00:00Z'),next=0,native=[],shares=[],calls=[],timers=new Map(),tid=0;
   const db=new Map(),elements=new Map(),registry=new Map();
+  const documentListeners=new Map(),windowListeners=new Map();
+  let heartbeats=0,aborts=0;
   class FakeDate extends Date{static now(){return now;}}
   class FakeBase{
     constructor(){
@@ -34,7 +36,11 @@ function make(configuredSlug,ingressUrl='/api/hassio_ingress/abc/luxe-xiaomi-rec
     return {tag,href:'',download:'',style:{},children:[],append(...a){this.children.push(...a)},remove(){},
       click(){if(tag==='a')native.push(this.href)},addEventListener(){},setAttribute(){}};
   }
-  const document={body:{append(){}},createElement:elt,cookie:''};
+  const document={
+    body:{append(){}},createElement:elt,cookie:'',hidden:false,
+    addEventListener:(event,fn)=>documentListeners.set(event,fn),
+    removeEventListener:(event)=>documentListeners.delete(event),
+  };
   const media=Buffer.alloc(2048);media.write('ftyp',4,'ascii');
   const blob=new Blob([media],{type:'video/mp4'});
   class FakeFile{
@@ -70,6 +76,15 @@ function make(configuredSlug,ingressUrl='/api/hassio_ingress/abc/luxe-xiaomi-rec
       }else db.delete(id);
       return response(null,204);
     }
+    if(path.includes('/heartbeat/')&&method==='POST'){
+      heartbeats++;
+      return response(null,204);
+    }
+    if(path.includes('/abort/')&&method==='POST'){
+      aborts++;
+      db.delete(path.split('/').at(-1));
+      return response(null,204);
+    }
     if(path.includes('/stop/')&&method==='POST'){
       const s=db.get(path.split('/').at(-1));s.state='stopping';return response(s);
     }
@@ -84,7 +99,11 @@ function make(configuredSlug,ingressUrl='/api/hassio_ingress/abc/luxe-xiaomi-rec
   const location={origin:'https://ha.test',protocol:'https:',href:'https://ha.test/lovelace/test'};
   const ctx={console,customElements,document,navigator,location,File:FakeFile,Blob,URL,Uint8Array,
     Date:FakeDate,Promise,
-    window:{customCards:[],confirm:()=>true},
+    window:{
+      customCards:[],confirm:()=>true,
+      addEventListener:(event,fn)=>windowListeners.set(event,fn),
+      removeEventListener:(event)=>windowListeners.delete(event),
+    },
     setInterval:()=>1,clearInterval(){},
     setTimeout(fn,delay){const id=++tid;timers.set(id,{at:now+delay,fn});return id},
     clearTimeout(id){timers.delete(id)}
@@ -121,7 +140,18 @@ function make(configuredSlug,ingressUrl='/api/hassio_ingress/abc/luxe-xiaomi-rec
       if(t.at<=now){timers.delete(id);t.fn();}
     }
   }
-  return {card,db,native,shares,calls,complete,advance};
+  return {
+    card,db,native,shares,calls,complete,advance,
+    background(){
+      document.hidden=true;
+      const fn=documentListeners.get('visibilitychange');
+      assert.ok(fn,'visibility handler must be registered');
+      fn();
+    },
+    foreground(){document.hidden=false;documentListeners.get('visibilitychange')?.()},
+    get aborts(){return aborts},
+    get heartbeats(){return heartbeats},
+  };
 }
 async function settle(){for(let i=0;i<25;i++)await new Promise(resolve=>setImmediate(resolve));}
 async function closeGroup(){
@@ -225,6 +255,37 @@ async function noReadyBadgeAndNoConfirmationUI(){
   assert.equal(status.hidden,true,'idle must not display stale ready status');
 }
 
+async function backgroundDiscardsRecordingImmediately(){
+  const h=make();
+  h.card.connectedCallback();
+  await h.card._startRecording(0);
+  assert.equal(h.card._recordings[0].state,'recording');
+  assert.ok(h.heartbeats>=1,'start must immediately renew its foreground lease');
+  const id=h.card._recordings[0].id;
+  h.background();
+  await settle();
+  assert.equal(h.card._recordings[0],null,'record icon must restore synchronously');
+  assert.equal(h.aborts,1,'background should send exactly one abort request');
+  assert.equal(h.db.has(id),false,'background abort must not produce a ready MP4');
+  assert.equal(h.native.length,0,'background must never open a download sheet');
+  assert.ok(h.calls.some(v=>v.msg==='录像已取消'));
+  h.foreground();
+  await h.card._rcRefresh();
+  assert.equal(h.card._recordings[0],null,'refresh must not resurrect cancelled REC');
+  await h.card._startRecording(0);
+  assert.equal(h.card._recordings[0].state,'recording','subsequent foreground recording must work');
+  h.card.disconnectedCallback();
+}
+async function backgroundDoesNotDiscardCompletedVideo(){
+  const h=make();
+  h.card.connectedCallback();
+  await h.card._startRecording(0);
+  const ready=h.complete(0);
+  await h.card._rcRefresh();await settle();
+  h.background();await settle();
+  assert.equal(h.aborts,0,'already ready MP4 must survive background');
+  assert.equal(h.db.get(ready.id).state,'ready');
+}
 async function localAddonSlugRegression(){
   const variants=[
     '/api/hassio_ingress/abc/luxe-xiaomi-recorder-rc.html',
@@ -244,7 +305,7 @@ async function localAddonSlugRegression(){
   }
 }
 async function test(){
- await localAddonSlugRegression();await noReadyBadgeAndNoConfirmationUI();await closeGroup();await staggered();await explicitNewRecordingCanAutoDownload();
- console.log('PASS: RC subclass 3-video coalescing, record icon reset on native/share opening, new recording purges old MP4, single native popup per group, explicit new recording permits new download, remaining-two share, navigation independence, full local Supervisor slug');
+ await localAddonSlugRegression();await backgroundDiscardsRecordingImmediately();await backgroundDoesNotDiscardCompletedVideo();await noReadyBadgeAndNoConfirmationUI();await closeGroup();await staggered();await explicitNewRecordingCanAutoDownload();
+ console.log('PASS: RC subclass 3-video coalescing, record icon reset on native/share opening, new recording purges old MP4, single native popup per group, explicit new recording permits new download, remaining-two share, navigation independence, full local Supervisor slug, background discard and fresh foreground recovery');
 }
 test().catch(e=>{console.error(e);process.exitCode=1;});
