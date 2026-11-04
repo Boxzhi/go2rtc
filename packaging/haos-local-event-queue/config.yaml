@@ -1,9 +1,9 @@
 name: "Luxe Event-Driven Download Queue POC"
 slug: "luxe_event_queue_poc"
-version: "0.4.1"
+version: "0.4.2"
 description: "Isolated event-driven triple recording and native download/share queue; not production"
 stage: experimental
-url: "https://github.com/Boxzhi/go2rtc/tree/feat/luxe-event-driven-download-queue"
+url: "https://github.com/Boxzhi/go2rtc/tree/feat/luxe-auto-resume-native-download"
 arch:
   - amd64
 startup: application
