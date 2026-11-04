@@ -77,6 +77,12 @@
         this._rcBatchLoading=false;
         this._rcBatchFailed='';
         this._rcGeneration=0;
+        this._rcBackgroundEpoch=0;
+        this._rcResolvedBase='';
+        this._rcHeartbeatInterval=null;
+        this._rcHiddenHandler=()=>this._rcOnVisibility();
+        this._rcPagehideHandler=()=>this._rcOnPagehide();
+        this._rcVisibilityBound=false;
       }
       setConfig(config){
         super.setConfig(config);
@@ -90,15 +96,25 @@
       }
       connectedCallback(){
         super.connectedCallback();
+        if(!this._rcVisibilityBound){
+          document.addEventListener('visibilitychange',this._rcHiddenHandler);
+          window.addEventListener('pagehide',this._rcPagehideHandler);
+          this._rcVisibilityBound=true;
+        }
         this._rcSetup();
       }
       disconnectedCallback(){
         this._rcStopPolling();
+        if(this._rcVisibilityBound){
+          document.removeEventListener('visibilitychange',this._rcHiddenHandler);
+          window.removeEventListener('pagehide',this._rcPagehideHandler);
+          this._rcVisibilityBound=false;
+        }
         clearTimeout(this._rcCoalesceTimer);
         this._rcCoalesceTimer=null;
         this._rcGeneration++;
-        // Parent calls _stopAllRecordings. This override makes it a no-op:
-        // server-side recording MUST survive HA navigation and app sleep.
+        // If the WKWebView is suspended before a JS event arrives, its
+        // foreground heartbeat will expire on the Go recording server.
         super.disconnectedCallback();
       }
       async _stopAllRecordings(){return true;}
@@ -131,11 +147,64 @@
       }
       _rcStopPolling(){
         if(this._rcPoll){clearInterval(this._rcPoll);this._rcPoll=null;}
+        if(this._rcHeartbeatInterval){
+          clearInterval(this._rcHeartbeatInterval);
+          this._rcHeartbeatInterval=null;
+        }
       }
       _rcStartPolling(){
         if(this._rcPoll)return;
         this._rcPoll=setInterval(()=>void this._rcRefresh(),1600);
+        this._rcHeartbeatInterval=setInterval(()=>void this._rcHeartbeat(),3000);
         if(this._rcKey)void this._rcRefresh(true);
+      }
+      _rcOnVisibility(){
+        // Never abort on blur alone: native iOS dialogs can remove focus
+        // without backgrounding the Home Assistant app.
+        if(document.hidden)this._rcAbortOnBackground('visibilitychange');
+      }
+      _rcOnPagehide(){
+        // Not guaranteed during iOS suspend; the server heartbeat fallback
+        // also handles unexpected WebView termination.
+        this._rcAbortOnBackground('pagehide');
+      }
+      _rcRequestBackgroundAction(id,action,keepalive=false){
+        // Background transitions cannot wait for a Supervisor WS handshake.
+        if(!this._rcKey||!this._rcResolvedBase||!id)return Promise.resolve();
+        const url=new URL('api/luxe/recordings/'+action+'/'+encodeURIComponent(id),
+          this._rcResolvedBase);
+        return fetch(url,{
+          method:'POST',credentials:'same-origin',cache:'no-store',
+          keepalive,headers:{'X-Luxe-Record-Key':this._rcKey}
+        });
+      }
+      _rcHeartbeat(){
+        if(!this.isConnected||document.hidden)return;
+        for(const s of this._recordings||[]){
+          if(!s?.id||!['recording','stopping','finalizing'].includes(s.state))continue;
+          void this._rcRequestBackgroundAction(s.id,'heartbeat').catch(()=>{});
+        }
+      }
+      _rcAbortOnBackground(reason){
+        const ongoing=(this._recordings||[]).filter(s=>
+          s && ['starting','recording','stopping','finalizing'].includes(s.state));
+        if(!ongoing.length)return;
+        this._rcBackgroundEpoch++;
+        this._rcAutoDone=true;
+        clearTimeout(this._rcCoalesceTimer);
+        this._rcCoalesceTimer=null;
+        this._rcBatch=null;
+        this._rcShowBatch();
+        for(let index=0;index<this._recordings.length;index++){
+          const s=this._recordings[index];
+          if(!s||!['starting','recording','stopping','finalizing'].includes(s.state))continue;
+          if(s.id)void this._rcRequestBackgroundAction(s.id,'abort',true).catch(()=>{});
+          this._recordings[index]=null;
+          this._rcBusy[index]=false;
+          this._syncRecordingUI(index);
+          this._mediaFeedback(index,'录像已取消');
+        }
+        console.info('Luxe recorder: background abort requested ('+reason+')');
       }
       async _rcIngressBase(){
         if(this._rcIngressPromise)return this._rcIngressPromise;
@@ -162,7 +231,9 @@
           if(root.origin!==location.origin)throw Error('RC Ingress 地址不是当前 HA 同源地址');
           const mount=root.pathname.match(/^\/api\/hassio_ingress\/[^/]+(?=\/|$)/)?.[0];
           if(!mount)throw Error('无法识别 RC Ingress 根路径');
-          return location.origin+mount+'/';
+          const base=location.origin+mount+'/';
+          this._rcResolvedBase=base;
+          return base;
         })().catch(e=>{this._rcIngressPromise=null;throw e;});
         return this._rcIngressPromise;
       }
@@ -195,6 +266,8 @@
         return String(this._config?.cameras?.[index]?.url||'').trim();
       }
       async _startRecording(index){
+        if(document.hidden)return;
+        const foregroundEpoch=this._rcBackgroundEpoch;
         const s=this._recordings?.[index];
         if(s?.state==='ready'){
           this._rcNativeSave(index);return;
@@ -224,10 +297,16 @@
           const result=await this._rcRequest('start','POST',{
             source,group:this._rcGroup,duration_seconds:1800,
           });
+          if(foregroundEpoch!==this._rcBackgroundEpoch||document.hidden){
+            if(result?.id)void this._rcRequestBackgroundAction(result.id,'abort',true).catch(()=>{});
+            this._recordings[index]=null;
+            return;
+          }
           this._rcExpected.add(source);
           this._recordings[index]=this._rcMapState(result);
-          this._rcAutoDone=false; // New sessions in the current active group are eligible.
-          this._mediaFeedback(index,'服务器已开始录像');
+          this._rcHeartbeat();
+          this._rcAutoDone=false;
+          this._mediaFeedback(index,'录像已开始');
           void this._rcRefresh();
         }catch(e){
           this._recordings[index]=null;
@@ -245,7 +324,7 @@
         this._syncRecordingUI(index);
         try{
           await this._rcRequest('stop/'+encodeURIComponent(state.id),'POST');
-          this._mediaFeedback(index,'服务端正在封装 MP4');
+          this._mediaFeedback(index,'正在生成录像');
           await this._rcRefresh();
           return true;
         }catch(e){
@@ -266,12 +345,14 @@
         };
       }
       async _rcRefresh(recovery=false){
-        if(!this.isConnected||!this._rcKey||this._rcRefreshing)return;
+        if(!this.isConnected||document.hidden||!this._rcKey||this._rcRefreshing)return;
         this._rcRefreshing=true;
         const generation=this._rcGeneration;
+        const backgroundEpoch=this._rcBackgroundEpoch;
         try{
           const response=await this._rcRequest('');
-          if(generation!==this._rcGeneration||!this.isConnected)return;
+          if(generation!==this._rcGeneration||backgroundEpoch!==this._rcBackgroundEpoch||
+             !this.isConnected||document.hidden)return;
           const sessions=response.sessions||[];
           const newly=[];
           for(let i=0;i<3;i++){
@@ -383,7 +464,7 @@
           this._rcRequested.add(s.id);
           this._recordings[index]=null;
           this._syncRecordingUI(index);
-          this._mediaFeedback(index,'已发起下载，录像按钮已恢复');
+          this._mediaFeedback(index,'已打开保存');
           await this._rcMarkPresented(s,index);
         }catch(e){
           this._rcBusy[index]=false;
@@ -496,7 +577,7 @@
           // the record controls remain idle, as explicitly requested.
           for(const {index,record} of entries)void this._rcMarkPresented(record,index);
           Promise.resolve(promise).then(
-            ()=>this._mediaFeedback(0,'已发起多文件分享，录制按钮已恢复'),
+            ()=>this._mediaFeedback(0,'已打开保存'),
             e=>console.warn('Luxe RC share dismissed:',errorText(e))
           );
         }catch(e){this._mediaFeedback(0,'打开分享失败：'+errorText(e));}
