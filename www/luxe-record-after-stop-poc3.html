@@ -35,8 +35,14 @@ button.accent{background:#007c95}
 <input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="填写测试 App 配置中的 secret">
 <label for="duration" style="margin-top:12px">本次三路录像时长</label>
 <select id="duration"><option value="5">5 秒</option><option value="10" selected>10 秒</option><option value="20">20 秒</option><option value="30">30 秒</option></select>
+<label for="mode" style="margin-top:12px">启动模式（用于诊断 RTSP 连接超时）</label>
+<select id="mode">
+<option value="parallel">三路同时启动（默认）</option>
+<option value="only_fixed">仅录制客厅固定（单路诊断）</option>
+<option value="stagger">三路错峰启动（各间隔 3 秒）</option>
+</select>
 <p>三路固定测试流：<code>poc_camera_1</code>、<code>poc_camera_2</code>、<code>poc_camera_3</code>，分别转发正式版已存在的视频流。</p>
-<button id="start" class="block">同时开始三路录像</button>
+<button id="start" class="block">开始所选录像测试</button>
 <button id="stop" class="alt block" disabled>停止全部正在录制的任务</button>
 </section>
 <section>
@@ -46,7 +52,7 @@ button.accent{background:#007c95}
 </section>
 <section>
 <h2>原生下载队列</h2>
-<p>三个 MP4 各自独立。第一路自动启动；后续每一路均需在原生界面保存并返回后手动确认，以避免同时存在多个 WKDownload Sheet。</p>
+<p>每个已录制成功的 MP4 都独立。全部成功时按三路顺序下载；若一路失败，也保留其余成功文件的顺序下载能力，并明确显示失败路数。原生界面保存后手动确认下一路。</p>
 <div id="current" class="status">等待录像完成</div>
 <button id="retry" class="alt" disabled>重试当前下载</button>
 <button id="next" class="accent" disabled>我已保存，下载下一路</button>
@@ -67,6 +73,7 @@ button.accent{background:#007c95}
  ];
  const apiBase=new URL("./api/luxe/poc3/",location.href);
  let records=[],pollTimer=null,queue=[],cursor=0,downloadStarted=false,groupLocked=false,groupStarted=false;
+ let intended=sources, failures=new Map(), groupLabel="三路";
  function log(message){
    const at=new Date().toLocaleTimeString();
    el("log").textContent+="["+at+"] "+message+"\n";
@@ -98,9 +105,12 @@ button.accent{background:#007c95}
      const detail=document.createElement("small");
      if(record){
        detail.textContent=record.state+" · "+(record.bytes/1048576).toFixed(2)+" MiB · "+(record.video_codec||"视频待定")+(record.audio_codec?" / "+record.audio_codec:"");
-     }else detail.textContent=groupStarted?"尚未创建/启动失败":"等待开始";
+     }else if(groupStarted&&!intended.some(s=>s.name===item.name))detail.textContent="本轮未参与";
+     else if(failures.has(item.name))detail.textContent="启动失败："+failures.get(item.name);
+     else detail.textContent=groupStarted?"等待连接 / 尚未创建":"等待开始";
      left.append(main,detail);
-     const state=document.createElement("span");state.className="tag";state.textContent=record?record.state:"未开始";
+     const state=document.createElement("span");state.className="tag";
+     state.textContent=record?record.state:failures.has(item.name)?"失败":groupStarted&&!intended.some(s=>s.name===item.name)?"跳过":"未开始";
      node.append(left,state);root.append(node);
    }
  }
@@ -120,28 +130,34 @@ button.accent{background:#007c95}
    resetTimer();
    el("stop").disabled=true;
    el("start").disabled=false;
-   if(records.length!==3 || records.some(r=>r.state!=="ready")){
-     summary("至少一路录制失败或缺失。不会自动启动下载；请查看日志，不要误判成功。");
-     return;
-   }
    if(groupLocked)return;
    groupLocked=true;
-   queue=[...records].sort((a,b)=>sources.findIndex(s=>s.name===a.source)-sources.findIndex(s=>s.name===b.source));
+   const successes=records.filter(r=>r.state==="ready"&&r.download_url);
+   const problems=intended.length-successes.length;
+   if(successes.length===0){
+     summary("本轮没有可下载的 MP4；请检查每路状态或更换测试模式。");
+     return;
+   }
+   queue=[...successes].sort((a,b)=>sources.findIndex(s=>s.name===a.source)-sources.findIndex(s=>s.name===b.source));
    cursor=0;
-   summary("三路 MP4 均已就绪。准备自动启动第一路原生下载。");
+   if(problems>0){
+     summary("本轮 "+successes.length+"/"+intended.length+" 路录像成功；"+problems+" 路失败或缺失。只自动下载成功的文件，不宣称三路成功。");
+   }else {
+     summary("本轮 "+successes.length+" 路 MP4 均已就绪；自动启动第一路原生下载。");
+   }
    startDownload();
  }
  function renderQueue(){
    const item=queue[cursor];
    if(!item){
-     el("current").textContent=cursor>=3&&queue.length===3?"三路均已由用户确认保存":"等待三路 MP4 就绪";
+     el("current").textContent=queue.length&&cursor>=queue.length?"本轮 "+queue.length+" 路均已由用户确认保存":"等待录像就绪";
      el("retry").disabled=true;el("next").disabled=true;
      return;
    }
-   el("current").textContent="第 "+(cursor+1)+" / 3 路："+sources[cursor].title+" — "+item.filename+"（"+(item.bytes/1048576).toFixed(2)+" MiB）";
+   el("current").textContent="第 "+(cursor+1)+" / "+queue.length+" 路："+(sources.find(s=>s.name===item.source)?.title||item.source)+" — "+item.filename+"（"+(item.bytes/1048576).toFixed(2)+" MiB）";
    el("retry").disabled=false;
    el("next").disabled=false;
-   el("next").textContent=cursor===2?"我已保存最后一路，完成":"我已保存，下载下一路";
+   el("next").textContent=cursor===queue.length-1?"我已保存最后一路，完成":"我已保存，下载下一路";
  }
  function startDownload(){
    if(downloadStarted)return;
@@ -163,23 +179,33 @@ button.accent{background:#007c95}
  async function beginAll(){
    if(groupStarted&&records.some(r=>r.state==="recording"||r.state==="stopping"))return;
    if(el("key").value.trim().length<24){summary("请填写长度至少 24 的 POC 密钥");return;}
-   groupStarted=true;groupLocked=false;downloadStarted=false;queue=[];cursor=0;records=[];
+   const mode=el("mode").value;
+   intended=mode==="only_fixed"?[sources[1]]:sources;
+   groupLabel=mode==="only_fixed"?"单路客厅固定":mode==="stagger"?"三路错峰":"三路并发";
+   groupStarted=true;groupLocked=false;downloadStarted=false;queue=[];cursor=0;records=[];failures=new Map();
    resetTimer();el("start").disabled=true;el("stop").disabled=true;
    renderQueue();rows();
    const duration=Number(el("duration").value);
-   summary("已请求三路开始录制（请求并发发起）");
-   const answers=await Promise.allSettled(sources.map(item=>call("start",{
-     method:"POST",headers:headers(true),
-     body:JSON.stringify({source:item.name,duration_seconds:duration})
-   })));
+   summary("已请求 "+groupLabel+" 录制；开始连接摄像头");
+   const startOne=async(item,index)=>{
+     if(mode==="stagger"&&index>0){
+       await new Promise(resolve=>setTimeout(resolve,index*3000));
+     }
+     return call("start",{
+       method:"POST",headers:headers(true),
+       body:JSON.stringify({source:item.name,duration_seconds:duration})
+     });
+   };
+   const answers=await Promise.allSettled(intended.map((item,index)=>startOne(item,index)));
    answers.forEach((answer,index)=>{
-     if(answer.status==="fulfilled"){records.push(answer.value);log(sources[index].title+"：录制会话已建立");}
-     else log(sources[index].title+"：启动失败："+String(answer.reason));
+     const item=intended[index];
+     if(answer.status==="fulfilled"){records.push(answer.value);log(item.title+"：录像会话已建立");}
+     else {failures.set(item.name,String(answer.reason));log(item.title+"：启动失败："+String(answer.reason));}
    });
    rows();
-   if(!records.length){summary("三路均无法启动，请检查独立测试实例日志");el("start").disabled=false;return;}
+   if(!records.length){summary("本轮所有请求均无法启动；请检查网络或选择单路诊断");el("start").disabled=false;return;}
    el("stop").disabled=false;
-   if(records.length!==3)summary("部分流启动失败，已启动的会继续录制，但不会自动下载。");
+   if(records.length!==intended.length)summary("本轮部分流启动失败，已启动的仍会继续录制；完成后可单独下载成功的 MP4。");
    pollTimer=setInterval(()=>void poll(),1000);
    void poll();
  }
@@ -199,9 +225,9 @@ button.accent{background:#007c95}
  });
  el("next").addEventListener("click",()=>{
    if(!queue[cursor])return;
-   log(sources[cursor].title+"：用户声明已保存；非原生确认回调");
+   log((sources.find(s=>s.name===queue[cursor].source)?.title||queue[cursor].source)+"：用户声明已保存；非原生确认回调");
    cursor++;downloadStarted=false;
-   if(cursor>=queue.length){renderQueue();summary("三个文件均由用户确认已保存；验证结束。");return;}
+   if(cursor>=queue.length){renderQueue();summary("本轮 "+queue.length+" 个文件已由用户确认保存；"+(intended.length>queue.length?"还有 "+(intended.length-queue.length)+" 路未成功。":"本轮全部完成。"));return;}
    startDownload();
  });
  rows();renderQueue();log("POC.3 已加载；最多 3 路短时录制，不修改 HA App");
