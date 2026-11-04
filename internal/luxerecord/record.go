@@ -106,6 +106,11 @@ func (m *manager) start(w http.ResponseWriter,r *http.Request) {
 		stream:stream,consumer:consumer,stop:make(chan struct{}),
 	}
 	m.mu.Lock()
+	// A previously presented recording is hidden from the Save UI but remains
+	// temporarily cached. Starting a new successful recording for this same
+	// camera invalidates that older cache immediately, independently of TTL.
+	// Do it only after AddConsumer succeeded; failed starts never discard it.
+	m.purgePresentedForSourceLocked(req.Source)
 	m.sessions[id]=s
 	m.mu.Unlock()
 	go m.record(s,file)
