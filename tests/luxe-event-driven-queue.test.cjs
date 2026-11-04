@@ -107,7 +107,7 @@ function createHarness() {
   const context = {
     document, navigator, Blob, File:MockFile, fetch:fetchMock,
     URL, Date, console, Promise, Uint8Array, String,
-    location:{href:"https://homeassistant.test/api/hassio_ingress/token/luxe-event-driven-download-queue.html"},
+    location:{href:"https://homeassistant.test/api/hassio_ingress/token/luxe-event-driven-download-queue.html",origin:"https://homeassistant.test"},
     setInterval(fn) { timers.push(fn); return timers.length; },
     clearInterval() {},
     setTimeout() { return 1; },
@@ -129,7 +129,6 @@ async function run() {
   await settle();
   h.ready("poc_camera_1");
   h.click("sync"); await settle();
-  if(h.nativeDownloads.length!==1) console.error("DEBUG FIRST DOWNLOAD:",h.get("log").textContent,h.get("summary").textContent);
   assert.equal(h.nativeDownloads.length,1,"first ready recording must automatically download");
   h.ready("poc_camera_2"); h.ready("poc_camera_3");
   h.click("sync"); await settle();
