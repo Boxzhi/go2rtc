@@ -72,6 +72,37 @@ const SHARE_FILE_CAP=16*1048576,SHARE_TOTAL_CAP=32*1048576;
 let currentGroup="",map=new Map(),activeNative=null,autoNativeIssued=false;
 let firstObservedReady=0,coalesceTimer=null,pollBusy=false,shareFiles=null,shareIDs="";
 let batchFetching=false,pendingConfirm=new Set(),previousReady=new Set(),refreshing=false,failedShareSig='';
+let backgroundEpoch=0,abortedIDs=new Set();
+function lease(s,action,keepalive=false){
+  if(!s?.id||$("secret").value.trim().length<24)return Promise.resolve();
+  return fetch(new URL(action+"/"+encodeURIComponent(s.id),api),{
+    method:"POST",cache:"no-store",keepalive,credentials:"same-origin",
+    headers:auth()
+  });
+}
+function renewForegroundLeases(){
+  if(document.hidden)return;
+  for(const s of map.values()){
+    if(["recording","stopping","finalizing"].includes(s.state))
+      void lease(s,"heartbeat").catch(()=>{});
+  }
+}
+function backgroundAbort(){
+  const ongoing=[...map.entries()].filter(([,s])=>
+    ["recording","stopping","finalizing"].includes(s?.state));
+  if(!ongoing.length)return;
+  backgroundEpoch++;
+  autoNativeIssued=true;
+  if(coalesceTimer!==null){clearTimeout(coalesceTimer);coalesceTimer=null;}
+  shareFiles=null;
+  for(const [source,s] of ongoing){
+    abortedIDs.add(s.id);
+    void lease(s,"abort",true).catch(()=>{});
+    map.delete(source);
+  }
+  draw();
+  feedback("录像已取消");
+}
 const log=s=>{$("logs").textContent+="["+new Date().toLocaleTimeString()+"] "+s+"\n";$("logs").scrollTop=$("logs").scrollHeight;};
 const feedback=s=>{$("feedback").textContent=s;log(s);};
 function auth(json=false){
@@ -169,7 +200,7 @@ function nativeSave(s){
     activeNative=s.id;
     pendingConfirm.add(s.id);
     map.delete(s.source);
-    log("已发起原生下载："+s.source+"；录像按钮立即恢复，取消保存也无需确认");
+    log("已打开保存："+s.source+"；录像按钮已恢复");
     draw();
     void markPresented(s);
   }catch(e){feedback("无法启动原生下载："+String(e));}
@@ -216,13 +247,13 @@ function onNewReady(added){
   },2000);
 }
 async function reload(recover=false){
-  if(refreshing||$("secret").value.trim().length<24)return;
+  if(document.hidden||refreshing||$("secret").value.trim().length<24)return;
   refreshing=true;
   try{
     const result=await call("",{headers:auth()});
     const latest=new Map();
     for(const s of result.sessions||[]){
-      if(!cams.some(c=>c.name===s.source)||s.state==="presented"||pendingConfirm.has(s.id))continue;
+      if(!cams.some(c=>c.name===s.source)||s.state==="presented"||s.state==="aborting"||abortedIDs.has(s.id)||pendingConfirm.has(s.id))continue;
       const existing=latest.get(s.source);
       if(!existing||Date.parse(s.started_at)>Date.parse(existing.started_at))latest.set(s.source,s);
     }
@@ -258,6 +289,8 @@ async function reload(recover=false){
   finally{refreshing=false;}
 }
 async function startOne(cam,groupId=""){
+  if(document.hidden)return;
+  const epoch=backgroundEpoch;
   if(!groupId){
     // Independently clicked camera buttons may belong to the same pending
     // group. Never reset the native-sheet guard while an earlier MP4 exists.
@@ -272,12 +305,19 @@ async function startOne(cam,groupId=""){
     const result=await call("start",{method:"POST",headers:auth(true),body:JSON.stringify({
       source:cam.name,group:groupId,duration_seconds:Number($("duration").value)
     })});
+    if(epoch!==backgroundEpoch||document.hidden){
+      if(result?.id)void lease(result,"abort",true).catch(()=>{});
+      if(result?.id)abortedIDs.add(result.id);
+      return;
+    }
     map.set(cam.name,result);
-    log(cam.label+" 录像已启动");
+    renewForegroundLeases();
+    feedback(cam.label+" 录像已开始");
     draw();
   }catch(e){feedback(cam.label+" 启动失败："+String(e));}
 }
 async function startAll(){
+  if(document.hidden)return;
   if($("secret").value.trim().length<24){feedback("请填写至少 24 字符的测试密钥");return;}
   currentGroup="g_"+Date.now().toString(36);
   autoNativeIssued=false;firstObservedReady=0;previousReady.clear();
@@ -287,7 +327,7 @@ async function startAll(){
 }
 async function stopOne(s){
   try{await call("stop/"+encodeURIComponent(s.id),{method:"POST",headers:auth(true)});
-    log(s.source+" 正在封装");await reload();
+    log(s.source+" 正在生成录像");await reload();
   }catch(e){feedback("停止失败："+String(e));}
 }
 async function prepareBatch(){
@@ -341,7 +381,7 @@ function share(){
     draw();
     for(const s of fileset)void markPresented(s);
     Promise.resolve(promise).then(
-      ()=>log("已发起多文件分享，所有对应按钮已恢复「录制」"),
+      ()=>log("已打开保存，所有对应按钮已恢复「录制」"),
       e=>log("分享面板取消或失败（缓存按原 15 分钟期限保留）："+String(e))
     );
   }catch(e){feedback("无法调用系统分享："+String(e));}
@@ -351,8 +391,13 @@ $("refresh").addEventListener("click",()=>void reload(true));
 $("batch").addEventListener("click",()=>void share());
 $("secret").addEventListener("change",()=>void reload(true));
 window.addEventListener("pageshow",()=>void reload(true));
-document.addEventListener("visibilitychange",()=>{if(!document.hidden)void reload(true)});
+document.addEventListener("visibilitychange",()=>{
+  if(document.hidden)backgroundAbort();
+  else void reload(true);
+});
+window.addEventListener("pagehide",backgroundAbort);
 setInterval(()=>{if(!$("secret").value.trim())return;void reload();},1500);
+setInterval(renewForegroundLeases,3000);
 setInterval(draw,1000);draw();
 log("Recorder RC 页面已加载，录像缓存独立计时 15 分钟");
 })();
