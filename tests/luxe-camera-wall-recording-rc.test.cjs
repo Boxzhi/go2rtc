@@ -139,8 +139,23 @@ async function staggered(){
   await h.card._stopAllRecordings('navigation');
   assert.ok([...h.db.values()].some(s=>s.state==='ready'));
 }
+async function noSecondNativeWhileFirstUnconfirmed(){
+  const h=make();
+  await h.card._startRecording(0);
+  h.complete(0);
+  await h.card._rcRefresh();await settle();
+  h.advance(2500);await settle();
+  assert.equal(h.native.length,1,'first recording should start native WKDownload');
+  h.advance(9000);
+  await h.card._startRecording(1);
+  h.complete(1);
+  await h.card._rcRefresh();await settle();
+  h.advance(2600);await settle();
+  assert.equal(h.native.length,1,'second recording must not interrupt an unacknowledged native download');
+  assert.equal(h.card._recordings[1].state,'ready','later recording must remain saveable');
+}
 async function test(){
- await closeGroup();await staggered();
- console.log('PASS: RC subclass 3-video coalescing, staggered single-native download, remaining-two share, navigation independence');
+ await closeGroup();await staggered();await noSecondNativeWhileFirstUnconfirmed();
+ console.log('PASS: RC subclass 3-video coalescing, staggered single-native download, no overlapping native sheets, remaining-two share, navigation independence');
 }
 test().catch(e=>{console.error(e);process.exitCode=1;});
