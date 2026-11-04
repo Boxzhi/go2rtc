@@ -27,7 +27,7 @@ jobs:
           match=re.search(r"<script>(.*?)</script>",html,re.DOTALL)
           if not match: raise SystemExit("missing recorder JS")
           Path("/tmp/luxe-recorder-rc.js").write_text(match.group(1))
-          for item in ["navigator.share", "ready_at", "expires_at", "confirm", "ack/"]:
+          for item in ["navigator.share", "ready_at", "expires_at", "presented", "ack/"]:
               if item not in html: raise SystemExit(f"missing state interface: {item}")
           PY
           node --check /tmp/luxe-recorder-rc.js
