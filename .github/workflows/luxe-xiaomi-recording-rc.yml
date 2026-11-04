@@ -32,6 +32,8 @@ jobs:
           PY
           node --check /tmp/luxe-recorder-rc.js
           node tests/luxe-recording-rc-flow.test.cjs
+          node --check www/luxe-camera-wall-recording-rc.js
+          node tests/luxe-camera-wall-recording-rc.test.cjs
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -100,6 +102,9 @@ jobs:
           cp packaging/haos-luxe-recording-rc/run.sh staging/luxe_xiaomi_record_rc/
           cp dist/go2rtc-luxe-recording-rc-amd64 staging/luxe_xiaomi_record_rc/go2rtc
           chmod +x staging/luxe_xiaomi_record_rc/go2rtc
+          cp www/luxe-camera-wall-recording-rc.js dist/luxe-camera-wall-recording-rc.js
+          cp docs/luxe-camera-wall-recording-rc-install.md dist/README-luxe-camera-wall-recording-rc.md
+          sha256sum dist/luxe-camera-wall-recording-rc.js >> dist/SHA256SUMS.txt
           tar -C staging -czf dist/luxe-xiaomi-recording-rc-local-app-amd64.tar.gz luxe_xiaomi_record_rc
           sha256sum dist/luxe-xiaomi-recording-rc-local-app-amd64.tar.gz >> dist/SHA256SUMS.txt
           tar tzf dist/luxe-xiaomi-recording-rc-local-app-amd64.tar.gz | grep -F 'luxe_xiaomi_record_rc/config.yaml'
