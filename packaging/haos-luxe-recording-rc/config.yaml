@@ -1,6 +1,6 @@
 name: "Luxe Xiaomi Camera Recording RC"
 slug: "luxe_xiaomi_record_rc"
-version: "1.9.15-luxe.record-rc1"
+version: "1.9.15-luxe.record-rc2"
 description: "Isolated feature-candidate build using production HLC7 and 15-minute temporary recording cache"
 stage: experimental
 url: "https://github.com/Boxzhi/go2rtc/tree/feat/luxe-xiaomi-recording-release-candidate"
