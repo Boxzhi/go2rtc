@@ -83,9 +83,10 @@ func (m *manager) stop(w http.ResponseWriter,id string) {
 	jsonResponse(w,200,result)
 }
 
-// ack is explicitly a USER declaration, not an actual native iOS save callback.
-// A canceled download must not call ack. Both actions intentionally remove the
-// temporary file and clear the camera's Save button.
+// "presented" acknowledges only the invocation of a native download/share
+// sheet, not actual saving. It hides the Save UI while preserving the MP4 for
+// the remainder of its original 15-minute TTL. "saved" and "discard" are
+// optional explicit cleanup actions and delete the file immediately.
 func (m *manager) ack(w http.ResponseWriter,r *http.Request,id string) {
 	if !safeName.MatchString(id) {errorResponse(w,404,"recording unavailable");return}
 	r.Body=http.MaxBytesReader(w,r.Body,512)
@@ -94,8 +95,8 @@ func (m *manager) ack(w http.ResponseWriter,r *http.Request,id string) {
 		Action string `json:"action"`
 	}
 	if err:=json.NewDecoder(r.Body).Decode(&body);err!=nil ||
-		(body.Action!="saved" && body.Action!="discard") {
-		errorResponse(w,400,"action must be saved or discard");return
+		(body.Action!="saved" && body.Action!="discard" && body.Action!="presented") {
+		errorResponse(w,400,"action must be presented, saved or discard");return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -106,7 +107,21 @@ func (m *manager) ack(w http.ResponseWriter,r *http.Request,id string) {
 		w.WriteHeader(http.StatusNoContent) // idempotent after prior ack or expiry
 		return
 	}
-	if s.State!="ready" {errorResponse(w,409,"recording not ready");return}
+	if body.Action=="presented" {
+		// A download/share sheet was invoked, NOT proof that iOS saved it.
+		// Remove Save UI by moving to a recoverable hidden state while
+		// retaining bytes and the original expiration timestamp.
+		if s.State=="presented" {w.WriteHeader(http.StatusNoContent);return}
+		if s.State!="ready" {errorResponse(w,409,"recording not ready");return}
+		s.State="presented"
+		if err:=m.saveManifestLocked(s);err!=nil {
+			s.State="ready"
+			errorResponse(w,500,"cannot persist presented state");return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if s.State!="ready" && s.State!="presented" {errorResponse(w,409,"recording not finalized");return}
 	delete(m.sessions,id)
 	m.deleteFiles(id)
 	w.WriteHeader(http.StatusNoContent)
@@ -118,7 +133,7 @@ func (m *manager) download(w http.ResponseWriter,r *http.Request,id string) {
 	m.mu.Lock()
 	m.pruneLocked(time.Now())
 	s:=m.sessions[id]
-	if s==nil||s.State!="ready"||token==""||
+	if s==nil||(s.State!="ready" && s.State!="presented")||token==""||
 		len(token)!=len(s.Token)||
 		subtle.ConstantTimeCompare([]byte(token),[]byte(s.Token))!=1 {
 		m.mu.Unlock()
