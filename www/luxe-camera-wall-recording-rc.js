@@ -17,9 +17,6 @@
     'ha-card { position:relative; }',
     '.tile.luxe-rc-ready .luxe-media-record { opacity:1!important; visibility:visible!important;pointer-events:auto!important;color:#a8e0ff; }',
     '.tile.luxe-rc-ready .luxe-media-snapshot { display:none; }',
-    '.luxe-rc-confirm {border:0;background:rgba(20,80,99,.9);color:white;border-radius:7px;font-size:12px;min-width:44px;min-height:27px;padding:4px 6px;cursor:pointer;}',
-    '.luxe-rc-confirm[hidden] {display:none!important;}',
-    '.luxe-rc-ackbox {position:absolute;right:7px;top:calc(50% + 46px);z-index:12;}',
     '.luxe-rc-group {position:absolute;left:50%;top:9px;transform:translateX(-50%);z-index:30;border:0;border-radius:10px;padding:10px 14px;background:rgba(5,104,131,.96);color:white;font-weight:700;white-space:nowrap;cursor:pointer;}',
     '.luxe-rc-group[hidden] {display:none!important;}',
     '.luxe-rc-keyback {position:fixed;inset:0;background:rgba(3,10,18,.75);display:grid;place-items:center;z-index:9999;padding:16px;box-sizing:border-box;}',
@@ -108,14 +105,8 @@
         super._createMediaTools(index,tile);
         const button=tile.querySelector('.luxe-media-record');
         if(button)button._rcOriginalHTML=button.innerHTML;
-        const area=document.createElement('div');area.className='luxe-rc-ackbox';
-        const confirm=document.createElement('button');
-        confirm.className='luxe-rc-confirm';
-        confirm.textContent='已保存';confirm.hidden=true;
-        confirm.addEventListener('click',event=>{
-          event.preventDefault();event.stopPropagation();void this._rcConfirmSaved(index);
-        });
-        area.append(confirm);tile.append(area);
+        // No confirmation UI: dispatching a native sheet consumes the Save
+        // state, not the recording's underlying 15-minute cache TTL.
       }
       _rcSetup(){
         if(!this.isConnected||!this._wall)return;
@@ -225,6 +216,9 @@
             this._rcExpected=new Set();
             this._rcAutoDone=false;
             this._rcReadySeen.clear();
+            // A new user-initiated recording group begins a new download
+            // interaction. Previously presented sessions are not pending.
+            this._rcRequested.clear();
           }
           const result=await this._rcRequest('start','POST',{
             source,group:this._rcGroup,duration_seconds:1800,
@@ -282,7 +276,9 @@
           for(let i=0;i<3;i++){
             if(this._rcBusy[i])continue;
             const source=this._rcSource(i);
-            const records=sessions.filter(s=>s.source===source);
+            // Presented MP4s remain in the 15-minute backend cache, but
+            // should never reappear as "Save" after reloading the view.
+            const records=sessions.filter(s=>s.source===source&&s.state!=='presented');
             records.sort((a,b)=>Date.parse(b.started_at)-Date.parse(a.started_at));
             const selected=records[0]||null;
             if(selected?.state==='ready'&&!this._rcReadySeen.has(selected.id)){
@@ -345,36 +341,54 @@
           }
         },wait);
       }
+      async _rcMarkPresented(record,index){
+        // This is a "download sheet requested" event, NOT an actual save.
+        // The Go backend keeps the file until 15 minutes after ready_at,
+        // or deletes it immediately when the same camera records again.
+        try{
+          await this._rcRequest('ack/'+encodeURIComponent(record.id),'POST',{action:'presented'});
+        }catch(e){
+          // Do not silently strand a file in ready state: restore the Save
+          // action if the backend acknowledgement could not be persisted.
+          this._rcRequested.delete(record.id);
+          if(index>=0)this._recordings[index]=record;
+          this._mediaFeedback(index>=0?index:0,'保存请求已发起，但状态同步失败：'+errorText(e));
+        }finally{
+          if(index>=0){
+            this._rcBusy[index]=false;
+            this._syncRecordingUI(index);
+          }
+          void this._rcRefresh();
+        }
+      }
       async _rcNativeSave(index){
         const s=this._recordings[index];
-        if(!valid(s)){this._mediaFeedback(index,'录像已过期，不能下载');void this._rcRefresh();return;}
+        if(!valid(s)){
+          this._mediaFeedback(index,'录像已过期，不能下载');
+          void this._rcRefresh();return;
+        }
+        if(this._rcBusy[index]||this._rcRequested.has(s.id))return;
+        this._rcBusy[index]=true;
         try{
           const base=await this._rcIngressBase();
           const u=new URL(s.download_url,base);
           if(u.origin!==location.origin)throw Error('下载链接非同源');
           const a=document.createElement('a');
           a.href=u.href;a.download=s.filename;a.style.display='none';
-          document.body.append(a);a.click();a.remove();
+          document.body.append(a);
+          try{a.click();}finally{a.remove();}
+          // Immediately restore record icon, regardless of whether the
+          // native Files sheet is later saved or cancelled.
           this._rcRequested.add(s.id);
-          s.downloadRequested=true;
-          this._syncRecordingUI(index);
-          this._mediaFeedback(index,'已请求下载；保存后请点「已保存」');
-        }catch(e){this._mediaFeedback(index,'下载失败：'+errorText(e));}
-      }
-      async _rcConfirmSaved(index){
-        const s=this._recordings?.[index];
-        if(!valid(s)||!this._rcRequested.has(s.id))return;
-        if(!window.confirm('确认该录像已保存到 iPhone「文件」？若取消下载，请选择取消并重新保存。'))return;
-        this._rcBusy[index]=true;
-        try{
-          await this._rcRequest('ack/'+encodeURIComponent(s.id),'POST',{action:'saved'});
-          this._rcRequested.delete(s.id);
           this._recordings[index]=null;
           this._syncRecordingUI(index);
-          this._mediaFeedback(index,'已确认保存，恢复录制按钮');
-          void this._rcRefresh();
-        }catch(e){this._mediaFeedback(index,'确认失败：'+errorText(e));}
-        finally{this._rcBusy[index]=false;}
+          this._mediaFeedback(index,'已发起下载，录像按钮已恢复');
+          await this._rcMarkPresented(s,index);
+        }catch(e){
+          this._rcBusy[index]=false;
+          this._mediaFeedback(index,'打开下载失败：'+errorText(e));
+          this._syncRecordingUI(index);
+        }
       }
       _syncRecordingUI(index){
         super._syncRecordingUI(index);
@@ -383,28 +397,20 @@
         const s=this._recordings?.[index];
         const button=tile.querySelector('.luxe-media-record');
         const status=tile.querySelector('.luxe-record-status');
-        const ack=tile.querySelector('.luxe-rc-confirm');
         const ready=valid(s);
         tile.classList.toggle('luxe-rc-ready',ready);
         if(button){
           if(!button._rcOriginalHTML)button._rcOriginalHTML=button.innerHTML;
           button.innerHTML=ready?ICON_SAVE:button._rcOriginalHTML;
-          button.title=ready?'保存录像（剩余 '+minsec(s.expiresAt-Date.now())+'）':
+          button.title=ready?'保存录像':
             s?.state==='recording'?'停止录像':'开始录像';
           button.setAttribute('aria-label',button.title+' '+this._cameraLabel(index));
         }
-        if(ack)ack.hidden=!(ready&&this._rcRequested.has(s.id));
         if(status){
-          if(ready){
-            status.hidden=false;
-            const label=status.querySelector('.record-status-label');
-            const dot=status.querySelector('.record-dot');
-            const spinner=status.querySelector('.record-status-spinner');
-            const timer=status.querySelector('.record-timer');
-            if(label){label.hidden=false;label.textContent='待保存 '+minsec(s.expiresAt-Date.now());}
-            if(dot)dot.hidden=true;
-            if(spinner)spinner.hidden=true;
-            if(timer)timer.hidden=true;
+          if(ready || !s || s.state==='presented'){
+            // Keep the video image uncluttered. Recording expiration still
+            // happens on the server but no countdown or Save badge is shown.
+            status.hidden=true;
           }else if(s?.state==='recording'){
             const timer=status.querySelector('.record-timer');
             if(timer)timer.textContent=minsec(Date.now()-s.startedAt);
@@ -469,18 +475,28 @@
       _rcShareBatch(){
         const batch=this._rcBatch;
         if(!batch||!batch.ids.every(id=>this._recordings.some(s=>valid(s)&&s.id===id)))return;
-        // Must be directly triggered by click to retain Web Share user gesture.
         try{
+          // Must invoke navigator.share directly inside the button gesture.
           const promise=navigator.share({files:batch.files});
-          for(const id of batch.ids)this._rcRequested.add(id);
-          for(let i=0;i<3;i++)this._syncRecordingUI(i);
+          const entries=batch.ids.map(id=>({
+            id,
+            index:this._recordings.findIndex(s=>s?.id===id)
+          })).map(({id,index})=>({index,record:this._recordings[index]}))
+            .filter(x=>x.record);
+          for(const {index,record} of entries){
+            this._rcRequested.add(record.id);
+            this._rcBusy[index]=true;
+            this._recordings[index]=null;
+            this._syncRecordingUI(index);
+          }
+          this._rcBatch=null;
+          this._rcShowBatch();
+          // Even if the user later cancels saving from the share sheet,
+          // the record controls remain idle, as explicitly requested.
+          for(const {index,record} of entries)void this._rcMarkPresented(record,index);
           Promise.resolve(promise).then(
-            ()=>this._mediaFeedback(0,'分享面板已返回，请分别确认已保存'),
-            e=>{
-              for(const id of batch.ids)this._rcRequested.delete(id);
-              for(let i=0;i<3;i++)this._syncRecordingUI(i);
-              console.warn('Luxe RC share cancelled:',errorText(e));
-            }
+            ()=>this._mediaFeedback(0,'已发起多文件分享，录制按钮已恢复'),
+            e=>console.warn('Luxe RC share dismissed:',errorText(e))
           );
         }catch(e){this._mediaFeedback(0,'打开分享失败：'+errorText(e));}
       }
